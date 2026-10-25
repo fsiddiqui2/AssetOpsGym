@@ -1,0 +1,26 @@
+spec_version: 1
+name: assetopsgym
+version: 0.1.0
+type: space
+runtime: fastapi
+app: assetopsgym.server.app:app
+port: 8000
+validation:
+  reward:
+    range: [-1.0, 1.0]
+    oracle_tolerance: 0.05
+    floor_margin: 0.5
+  resources:
+    cpu: 2.0
+    memory_mb: 4096
+    disk_mb: 2048
+    episode_timeout_s: 3600.0
+  capabilities:
+    verifier:
+      kind: reward_channel
+    declared_tools: [current_time, advance_time, list_alerts, finish, sites, asset_ids, asset_detail, assets,
+                     installed_sensors, measured_sensors, stream_extent, history, latest_reading, sensor_stats,
+                     sensor_coverage, list_workorders, get_workorder, get_failure_codes, generate_work_order,
+                     update_workorder, cancel_workorder]
+  types:
+    tags: [industrial, maintenance, mcp, assetopsbench]

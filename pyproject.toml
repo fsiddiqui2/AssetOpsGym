@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-assetopsgym"
+version = "0.1.0"
+description = "AssetOpsGym: a closed-loop chiller operations environment for industrial agents on OpenEnv, backed by AssetOpsBench MCP servers"
+requires-python = ">=3.12"
+dependencies = [
+    "openenv>=0.10.0",
+    "fastmcp>=2.14.5",
+    "mcp>=1.26.0",
+    "fastapi>=0.115.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.24.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+agent = ["openai>=1.40.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+server = "assetopsgym.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["assetopsgym", "assetopsgym.server"]
+package-dir = { "assetopsgym" = ".", "assetopsgym.server" = "server" }
