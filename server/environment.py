@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import threading
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -94,17 +95,20 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         mcp = FastMCP("assetopsgym")
         env = self
 
+        # The clock tools run in a worker thread so CouchDB writes don't block the server's
+        # event loop (other sessions keep stepping); the lock keeps this episode's simulator
+        # single-threaded.
         @mcp.tool
         def current_time() -> dict:
             """Current simulated time and the end of your shift (ISO 8601, UTC)."""
             return env._clock()
 
         @mcp.tool
-        def advance_time(hours: float) -> dict:
+        async def advance_time(hours: float) -> dict:
             """Let simulated time pass, between 0.25 and 168 hours. New telemetry lands in the IoT
             store and the maintenance organization works its queue. Returns the new time, the alerts
             raised meanwhile and any work-order updates."""
-            return env._advance(hours)
+            return await asyncio.to_thread(env._locked, env._advance, hours)
 
         @mcp.tool
         def list_alerts(since: Optional[str] = None, kind: Optional[str] = None, limit: int = 50) -> dict:
@@ -118,12 +122,13 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return env._alerts(since, kind, limit)
 
         @mcp.tool
-        def finish() -> dict:
+        async def finish() -> dict:
             """End your shift now. The rest of the horizon is simulated without you and the episode is scored."""
-            return env._finish()
+            return await asyncio.to_thread(env._locked, env._finish)
 
         super().__init__(mcp)
         self.max_steps = max_steps
+        self._lock = threading.Lock()
         self.couch = Couch(f"aog_{uuid.uuid4().hex[:10]}")
         self.couch.recreate()
         self.bridge = AOBBridge(self.couch.server_env())
@@ -234,10 +239,33 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         return {"message": "Shift ended; the remaining time was simulated.", "score": self._result["score"]}
 
     # ---- plumbing ---------------------------------------------------------
+    def _locked(self, fn, *args):
+        with self._lock:
+            return fn(*args)
+
     def _call_proxied(self, name: str, arguments: dict) -> Any:
         if self.sim is None or self._result is not None:
             raise RuntimeError("no running episode; call reset")
-        return self._fix_clock(name, self.bridge.call(self.proxied[name], name, arguments))
+        with self._lock:
+            data = self.bridge.call(self.proxied[name], name, arguments)
+            if name == "update_workorder" and arguments.get("notes") is not None:
+                self._keep_tech_log(arguments, data)
+            return self._fix_clock(name, data)
+
+    def _keep_tech_log(self, arguments: dict, data: Any) -> None:
+        """The WO server's update_workorder(notes=...) replaces the long description, which is
+        also where the planner and technicians write. Rebuild it: their log, then the agent's note."""
+        wonum = arguments.get("wonum")
+        wo = self.sim.wos.get(wonum)
+        doc = self.couch.get("wo", f"wo:{(arguments.get('site_id') or SITE).upper()}:{wonum}")
+        if doc is None:
+            return
+        log = "\n".join(wo.notes) if wo else ""
+        doc["description_longdescription"] = (log + "\n" if log else "") + \
+            f"[{iso(self.sim.now)}] Agent: {arguments['notes']}"
+        self.couch.put("wo", doc)
+        if isinstance(data, dict) and isinstance(data.get("work_order"), dict):
+            data["work_order"]["description_longdescription"] = doc["description_longdescription"]
 
     def _fix_clock(self, name: str, data: Any) -> Any:
         """AssetOpsBench servers read the wall clock; rewrite to simulated time."""

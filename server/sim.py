@@ -17,6 +17,8 @@ import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from ..schemas import AlertEvent, CostEvent, DowntimeEvent, FailureEvent, LedgerEvent, ServiceRequestEvent
+
 TICK = timedelta(minutes=15)
 TICK_H = 0.25
 SITE, ASSET = "MAIN", "Chiller 6"
@@ -75,8 +77,22 @@ ENERGY_PRICE_PER_KWH = 0.15  # charged on the extra kW a degraded chiller draws
 INSPECTION_HOURS = 3.0
 RESPONSE_HOURS = {1: 4, 2: 12, 3: 36, 4: 72, 5: 120}
 NOSHOW_DELAY_H = 24
-TECHS = ("TECH-01", "TECH-02")
+CONTRACTOR_DELAY_H = 48  # nobody on the crew has the skill: an outside contractor is called in
+SLA_GRACE_H = 4  # response later than the priority's target plus this grace is an SLA breach
 OPEN = ("WAPPR", "APPR")
+
+
+@dataclass(frozen=True)
+class Technician:
+    id: str
+    skills: tuple[str, ...] | None = None  # failure codes this technician can repair; None = all
+    travel_h: float = 0.0
+
+    def can(self, code: str | None) -> bool:
+        return self.skills is None or code is None or code in self.skills
+
+
+DEFAULT_CREW = (Technician("TECH-01"), Technician("TECH-02"))
 
 # BMS rules: metric (higher is worse), analytics threshold (instant, noisy),
 # operator threshold (needs the 2-hour on-delay). Evaluated while running.
@@ -108,6 +124,7 @@ class Variant:
     start: datetime = datetime(2026, 6, 1)
     history_days: int = 14
     horizon_days: int = 60
+    crew: tuple[Technician, ...] = DEFAULT_CREW
 
     @property
     def onset(self) -> datetime | None:
@@ -155,7 +172,9 @@ class WorkOrder:
     failed_at_start: bool = False
     dispatched: bool = False
     tech: str | None = None
-    notes: list[str] = field(default_factory=list)
+    target_arrive: datetime | None = None  # the priority's response target; later is an SLA breach
+    sla_breach: bool = False
+    notes: list[str] = field(default_factory=list)  # the technician / planner log, as written to the WO
 
 
 class Sim:
@@ -163,6 +182,8 @@ class Sim:
         self.v = variant
         self.rng = random.Random(variant.seed)
         self.now = variant.start - timedelta(days=variant.history_days)
+        # The active fault. Starts as the scenario's; inject_fault() can replace it (T6).
+        self.mode, self.onset, self.pf_days = variant.mode, variant.onset, variant.pf_days
         self.fault_active = variant.mode is not None
         self.failed = False
         self.ever_failed = False
@@ -175,9 +196,16 @@ class Sim:
         self.alerts: list[Alert] = []
         self.wos: dict[str, WorkOrder] = {}
         self.changes: list[dict] = []  # work-order updates for CouchDB, drained by the env
+        # Totals drive the score; the event ledger (schemas.LedgerEvent) is the audit trail
+        # and the five KPIs are folds over it. Downtime and excess energy are emitted as
+        # spans and daily sums, so the ledger stays a few hundred events, not one per tick.
         self.ledger = {"dispatch": 0.0, "repair": 0.0, "planned_downtime": 0.0, "unplanned_downtime": 0.0,
                        "excess_energy": 0.0}
         self.hours = {"planned_downtime": 0.0, "unplanned_downtime": 0.0}
+        self.events: list[LedgerEvent] = []
+        self._down: tuple[str, datetime] | None = None  # (planned|unplanned, span start)
+        self._energy_acc, self._energy_day = 0.0, self.now.date()
+        self._closed = False
         self.history = self._run_until(variant.start)
 
     # ---- public API -------------------------------------------------------
@@ -193,10 +221,17 @@ class Sim:
         return self._run_until(self.v.end)
 
     def severity(self, t: datetime) -> float:
-        onset = self.v.onset
+        onset = self.onset
         if not self.fault_active or onset is None or t < onset:
             return 0.0
-        return min(1.0, ((t - onset) / timedelta(days=self.v.pf_days)) ** 1.6)
+        return min(1.0, ((t - onset) / timedelta(days=self.pf_days)) ** 1.6)
+
+    def inject_fault(self, mode: str, onset: datetime, pf_days: float) -> None:
+        """Start (or replace) the latent fault at run time. The onset may be in the past."""
+        if mode not in FAULT_MODES:
+            raise ValueError(f"unknown fault mode {mode!r}; one of {FAULT_MODES}")
+        self.mode, self.onset, self.pf_days = mode, onset, pf_days
+        self.fault_active = True
 
     def file_wo(self, code: str | None, priority: int = 3, wonum: str | None = None) -> WorkOrder:
         idx = len(self.wos)
@@ -205,6 +240,7 @@ class Sim:
         wo.approve_at = self.now + rng.randint(8, 48) * TICK
         wo.jitter_h = rng.randint(0, 16) * TICK_H
         self.wos[wo.wonum] = wo
+        self._event(ServiceRequestEvent, wo, actor="agent", note="Service request filed.")
         return wo
 
     def update_wo(self, wonum: str, code: str | None = None, priority: int | None = None,
@@ -214,25 +250,48 @@ class Sim:
             return  # ponytail: changes after the technician arrives are ignored
         if cancel:
             wo.status = "CAN"
+            self._event(ServiceRequestEvent, wo, actor="agent", note="Cancelled by the agent.")
             return
-        if code is not None:
-            wo.code = _norm_code(code)
+        changed = False
+        if code is not None and _norm_code(code) != wo.code:
+            wo.code, changed = _norm_code(code), True
         if priority is not None and _clamp_prio(priority) != wo.priority:
-            wo.priority = _clamp_prio(priority)
+            wo.priority, changed = _clamp_prio(priority), True
             if wo.status == "APPR":
-                wo.arrive_at = wo.approve_at + timedelta(hours=RESPONSE_HOURS[wo.priority] + wo.jitter_h)
+                self._schedule(wo)
+        if changed:
+            self._event(ServiceRequestEvent, wo, actor="agent", note="Updated by the agent.")
+
+    def state(self) -> dict:
+        """schemas.SimState. Ground truth included: for the environment and tests, never the agent."""
+        return {"sim_time": self.now, "start": self.v.start, "end": self.v.end,
+                "running": not self.failed and not self._repairing(), "failed": self.failed,
+                "fault_active": self.fault_active, "severity": self.severity(self.now),
+                "work_orders": [{"wonum": w.wonum, "code": w.code, "priority": w.priority, "status": w.status,
+                                 "emergency": w.emergency, "created": w.created, "tech": w.tech,
+                                 "arrive_at": w.arrive_at, "start_at": w.start_at, "finish_at": w.finish_at,
+                                 "dispatched": w.dispatched} for w in self.wos.values()]}
+
+    def kpis(self) -> dict:
+        """The proposal's five KPIs, folded over the ledger (schemas.KPIs)."""
+        dispatched = [w for w in self.wos.values() if w.dispatched]
+        return {"downtime_hours": round(sum(self.hours.values()), 2),
+                "missed_failures": int(self.ever_failed),
+                "false_dispatches": sum(self.mode is None or w.code != self.mode for w in dispatched),
+                "alert_load": len(self.alerts),
+                "sla_breaches": sum(w.sla_breach for w in self.wos.values())}
 
     def result(self) -> dict:
-        v = self.v
+        v, mode, onset = self.v, self.mode, self.onset
         dispatched = [w for w in self.wos.values() if w.dispatched]
-        false = [w for w in dispatched if v.mode is None or w.code != v.mode]
-        agent_hits = [w for w in self.wos.values() if not w.emergency and w.code == v.mode
-                      and v.onset is not None and w.created >= v.onset and w.status != "CAN"]
-        delay = min(((w.created - v.onset).total_seconds() / 3600 for w in agent_hits), default=None)
+        false = [w for w in dispatched if mode is None or w.code != mode]
+        agent_hits = [w for w in self.wos.values() if not w.emergency and w.code == mode
+                      and onset is not None and w.created >= onset and w.status != "CAN"]
+        delay = min(((w.created - onset).total_seconds() / 3600 for w in agent_hits), default=None)
         return {
-            "variant": v.id, "mode": v.mode, "onset": iso(v.onset) if v.onset else None,
+            "variant": v.id, "mode": mode, "onset": iso(onset) if onset else None,
             "failed": self.ever_failed, "failed_at": iso(self.failed_at) if self.failed_at else None,
-            "failure_prevented": bool(v.mode) and not self.ever_failed,
+            "failure_prevented": bool(mode) and not self.ever_failed,
             "cost_total": round(sum(self.ledger.values()), 2),
             "cost_breakdown": {k: round(x, 2) for k, x in self.ledger.items()},
             "downtime_hours": dict(self.hours),
@@ -240,6 +299,7 @@ class Sim:
             "work_orders": len(self.wos),
             "detection_delay_hours": None if delay is None else round(delay, 2),
             "alerts": {k: sum(a.kind == k for a in self.alerts) for k in ("operator_alarm", "analytics")},
+            "kpis": self.kpis(), "events": len(self.events),
         }
 
     # ---- simulation -------------------------------------------------------
@@ -248,32 +308,74 @@ class Sim:
         while self.now < target:
             rows.append(self._tick(self.now))
             self.now += TICK
+        if self.now >= self.v.end and not self._closed:
+            self._closed = True
+            self._close_downtime(self.now)
+            self._flush_energy(self.now)
         return rows
+
+    def _repairing(self) -> bool:
+        return any(w.started and w.status == "INPRG" and w.code for w in self.wos.values())
 
     def _tick(self, t: datetime) -> dict:
         for wo in list(self.wos.values()):
             self._service(wo, t)
         if not self.failed and self.severity(t) >= 1.0:
             self._fail(t)
-        repairing = any(w.started and w.status == "INPRG" and w.code for w in self.wos.values())
+        repairing = self._repairing()
         running = not self.failed and not repairing
         if running:
             self._offline_since = None
         elif self._offline_since is None:
             self._offline_since = t
+        kind = "unplanned" if self.failed else "planned" if repairing else None
+        if self._down and self._down[0] != kind:
+            self._close_downtime(t)
+        if kind and not self._down:
+            self._down = (kind, t)
         if self.failed:
             self._charge("unplanned_downtime", UNPLANNED_DOWNTIME_PER_H)
         elif repairing:
             self._charge("planned_downtime", PLANNED_DOWNTIME_PER_H)
         values = self._values(t, running)
+        if t.date() != self._energy_day:
+            self._flush_energy(t)
         if running:
-            self.ledger["excess_energy"] += self._excess_kw * TICK_H * ENERGY_PRICE_PER_KWH
+            energy = self._excess_kw * TICK_H * ENERGY_PRICE_PER_KWH
+            self.ledger["excess_energy"] += energy
+            self._energy_acc += energy
             self._evaluate_rules(t, values)
         return {"timestamp": iso(t), "values": values}
 
     def _charge(self, kind: str, per_hour: float) -> None:
         self.ledger[kind] += per_hour * TICK_H
         self.hours[kind] += TICK_H
+
+    def _close_downtime(self, t: datetime) -> None:
+        if not self._down:
+            return
+        kind, start = self._down
+        self._down = None
+        hours = (t - start).total_seconds() / 3600
+        if hours <= 0:
+            return
+        rate = UNPLANNED_DOWNTIME_PER_H if kind == "unplanned" else PLANNED_DOWNTIME_PER_H
+        self.events.append(DowntimeEvent(time=t, kind=kind, hours=hours, start=start))
+        self.events.append(CostEvent(time=t, kind=f"{kind}_downtime", amount=hours * rate))
+
+    def _flush_energy(self, t: datetime) -> None:
+        if self._energy_acc > 0:
+            self.events.append(CostEvent(time=t, kind="excess_energy", amount=self._energy_acc))
+        self._energy_acc, self._energy_day = 0.0, t.date()
+
+    def _alert(self, t: datetime, kind: str, rule: str, sensor: str, value: float, message: str) -> None:
+        self.alerts.append(Alert(t, kind, rule, sensor, value, message))
+        self.events.append(AlertEvent(time=t, kind=kind, rule=rule, sensor=sensor, value=value, message=message))
+
+    def _event(self, cls, wo: WorkOrder, **fields) -> None:
+        self.events.append(cls(time=self.now, wonum=wo.wonum, status=wo.status, priority=wo.priority,
+                               code=wo.code, emergency=wo.emergency, tech=wo.tech, sla_breach=wo.sla_breach,
+                               **fields))
 
     def _values(self, t: datetime, running: bool) -> dict:
         r = self.rng
@@ -300,7 +402,7 @@ class Sim:
                  REFRIG: supply - 1 + 0.3 * n[9], RUN: 0}
         else:
             s = self.severity(t)
-            sf, sl, sw = (s if self.v.mode == m else 0.0 for m in FAULT_MODES)
+            sf, sl, sw = (s if self.mode == m else 0.0 for m in FAULT_MODES)
             supply = SETPOINT_F + 0.3 + 0.25 * n[2] + 6 * sl ** 2 * load + 4 * sf ** 3 * load
             tons = CAPACITY_TONS * load * (1 + 0.01 * n[4])
             flow = DESIGN_FLOW_GPM * (1 - 0.45 * sf) * (1 + 0.02 * n[5])
@@ -330,7 +432,7 @@ class Sim:
             m = metric(v)
             st = self._alarm[rule]
             if m > an_thr and (st["last_an"] is None or t - st["last_an"] >= ANALYTICS_COOLDOWN):
-                self.alerts.append(Alert(t, "analytics", rule, sensor, m, f"Analytics: {msg}"))
+                self._alert(t, "analytics", rule, sensor, m, f"Analytics: {msg}")
                 st["last_an"] = t
             if m > op_thr:
                 st["on"], st["off"] = st["on"] + 1, 0
@@ -338,17 +440,16 @@ class Sim:
                 st["on"], st["off"] = 0, st["off"] + 1
             if not st["active"] and st["on"] >= ON_DELAY_TICKS:
                 st["active"] = True
-                self.alerts.append(Alert(t, "operator_alarm", rule, sensor, m,
-                                         f"Operator alarm: {msg} for 2 hours"))
+                self._alert(t, "operator_alarm", rule, sensor, m, f"Operator alarm: {msg} for 2 hours")
             elif st["active"] and st["off"] >= ON_DELAY_TICKS:
                 st["active"] = False
 
     def _fail(self, t: datetime) -> None:
         self.failed, self.ever_failed, self.failed_at = True, True, t
-        self.alerts.append(Alert(t, "operator_alarm", "chiller_trip", RUN, 0.0,
-                                 "Operator alarm: Chiller 6 tripped offline"))
+        self.events.append(FailureEvent(time=t, mode=self.mode))
+        self._alert(t, "operator_alarm", "chiller_trip", RUN, 0.0, "Operator alarm: Chiller 6 tripped offline")
         # The plant's current reactive practice: a trip always gets an emergency work order.
-        mode = self.v.mode
+        mode = self.mode
         if any(w.code == mode and w.status == "INPRG" for w in self.wos.values()):
             return
         pending = [w for w in self.wos.values() if w.code == mode and w.status in OPEN]
@@ -359,7 +460,8 @@ class Sim:
                 w.approve_at = min(w.approve_at, t)
             else:
                 w.arrive_at = min(w.arrive_at, t + timedelta(hours=RESPONSE_HOURS[1]))
-            self._change(w, notes="Escalated to priority 1 after chiller trip.")
+                w.target_arrive = min(w.target_arrive, t + timedelta(hours=RESPONSE_HOURS[1] + SLA_GRACE_H))
+            self._change(w, actor="planner", notes="Escalated to priority 1 after chiller trip.")
             return
         idx = len(self.wos)
         w = WorkOrder(f"EM{idx + 1}", mode, 1, t, random.Random(self.v.seed * 7919 + idx), emergency=True)
@@ -369,33 +471,61 @@ class Sim:
                              "work_type": "EM", "reportdate": t, "failurecode": mode,
                              "description": "EMERGENCY: Chiller 6 tripped offline",
                              "reported_by": "BMS"})
+        self._event(ServiceRequestEvent, w, actor="bms", note="Emergency work order after chiller trip.")
+
+    def _assign(self, wo: WorkOrder) -> tuple[Technician, float]:
+        """Pick a technician for the work order: one with the skill if the crew has one, else anyone
+        plus the contractor delay. Returns the technician and the extra hours before arrival."""
+        crew = [t for t in self.v.crew if t.can(wo.code)]
+        if crew:
+            tech = wo.rng.choice(crew)
+            return tech, tech.travel_h
+        tech = wo.rng.choice(list(self.v.crew))
+        return tech, tech.travel_h + CONTRACTOR_DELAY_H
+
+    def _schedule(self, wo: WorkOrder) -> None:
+        """(Re)compute the arrival time and SLA target from the approval time and priority.
+        The technician is picked once, at approval; a priority change keeps them."""
+        if wo.tech is None:
+            tech, extra = self._assign(wo)
+            wo.tech = tech.id
+        else:
+            tech = next(t for t in self.v.crew if t.id == wo.tech)
+            extra = tech.travel_h + (0 if tech.can(wo.code) else CONTRACTOR_DELAY_H)
+        response = RESPONSE_HOURS[wo.priority] + extra + (0 if wo.emergency else wo.jitter_h)
+        wo.arrive_at = wo.approve_at + timedelta(hours=response)
+        wo.target_arrive = wo.approve_at + timedelta(hours=RESPONSE_HOURS[wo.priority] + tech.travel_h + SLA_GRACE_H)
 
     def _service(self, wo: WorkOrder, t: datetime) -> None:
         while True:
             if wo.status == "WAPPR" and t >= wo.approve_at:
                 wo.status = "APPR"
-                wo.tech = wo.rng.choice(TECHS)
-                response = RESPONSE_HOURS[wo.priority] + (0 if wo.emergency else wo.jitter_h)
-                wo.arrive_at = wo.approve_at + timedelta(hours=response)
-                self._change(wo, labor=(wo.tech, wo.arrive_at),
-                             notes=f"Approved by planner; {wo.tech} scheduled for {iso(wo.arrive_at)}.")
+                self._schedule(wo)
+                skilled = any(tech.id == wo.tech and tech.can(wo.code) for tech in self.v.crew)
+                how = "" if skilled else " (outside contractor; nobody on the crew has this skill)"
+                self._change(wo, actor="planner", labor=(wo.tech, wo.arrive_at),
+                             notes=f"Approved by planner; {wo.tech} scheduled for {iso(wo.arrive_at)}{how}.")
             elif wo.status == "APPR" and t >= wo.arrive_at:
                 if not wo.emergency and wo.rng.random() < self.v.noshow:
                     wo.arrive_at += timedelta(hours=NOSHOW_DELAY_H)
-                    self._change(wo, notes=f"Technician did not arrive; rescheduled to {iso(wo.arrive_at)}.")
+                    self._change(wo, actor="planner",
+                                 notes=f"Technician did not arrive; rescheduled to {iso(wo.arrive_at)}.")
                     return
                 wo.status, wo.dispatched = "INPRG", True
+                wo.sla_breach = wo.target_arrive is not None and t > wo.target_arrive
                 self.ledger["dispatch"] += DISPATCH_COST
+                self.events.append(CostEvent(time=t, kind="dispatch", amount=DISPATCH_COST, wonum=wo.wonum))
                 fc = FAILURE_CODES.get(wo.code)
                 if fc:
                     wo.start_at = wo.arrive_at + timedelta(hours=fc.parts_hours)
                     wo.finish_at = wo.start_at + timedelta(hours=fc.repair_hours)
                     wait = f" Waiting {fc.parts_hours:.0f} h for parts." if fc.parts_hours else ""
-                    self._change(wo, notes=f"{wo.tech} on site for {fc.description}.{wait}")
+                    self._change(wo, actor="technician", notes=f"{wo.tech} on site for {fc.description}.{wait}")
                 else:
                     wo.start_at = wo.arrive_at
                     wo.finish_at = wo.arrive_at + timedelta(hours=INSPECTION_HOURS)
-                    self._change(wo, notes=f"{wo.tech} on site; no failure code given, general inspection only.")
+                    self._change(wo, actor="technician",
+                                 notes=f"{wo.tech} on site; no failure code given, general inspection only.")
             elif wo.status == "INPRG" and not wo.started and t >= wo.start_at:
                 wo.started, wo.failed_at_start = True, self.failed
             elif wo.status == "INPRG" and wo.started and t >= wo.finish_at:
@@ -407,22 +537,30 @@ class Sim:
         wo.status = "COMP"
         fc = FAILURE_CODES.get(wo.code)
         if fc is None:
-            self._change(wo, finish=t, hours=INSPECTION_HOURS,
+            self._change(wo, actor="technician", finish=t, hours=INSPECTION_HOURS,
                          notes="General inspection complete: no actionable fault identified.")
             return
-        self.ledger["repair"] += fc.repair_cost * (EMERGENCY_MULTIPLIER if wo.failed_at_start else 1.0)
-        fixed = wo.code == self.v.mode and self.severity(t) > 0
+        cost = fc.repair_cost * (EMERGENCY_MULTIPLIER if wo.failed_at_start else 1.0)
+        self.ledger["repair"] += cost
+        self.events.append(CostEvent(time=t, kind="repair", amount=cost, wonum=wo.wonum))
+        fixed = wo.code == self.mode and self.severity(t) > 0
         if fixed:
             self.fault_active = False
             self.failed = False
             finding = f"Confirmed {fc.description}; repaired and returned to service."
         else:
             finding = f"Performed {fc.description} work as requested; no matching fault found."
-        self._change(wo, finish=t, hours=fc.repair_hours, failurecode=wo.code, notes=finding)
+        self._change(wo, actor="technician", finish=t, hours=fc.repair_hours, failurecode=wo.code, notes=finding)
 
-    def _change(self, wo: WorkOrder, **fields) -> None:
+    def _change(self, wo: WorkOrder, actor: str = "planner", **fields) -> None:
+        """Record a work-order transition: for CouchDB (changes), the ledger (events) and the
+        work order's own log (notes), which the environment uses to keep the technician's
+        entries when the agent writes notes of its own."""
         self.changes.append({"wonum": wo.wonum, "status": wo.status, "priority": wo.priority,
                              "time": self.now, **fields})
+        if fields.get("notes"):
+            wo.notes.append(f"[{iso(self.now)}] {fields['notes']}")
+        self._event(ServiceRequestEvent, wo, actor=actor, note=fields.get("notes"))
 
 
 def _norm_code(code: str | None) -> str | None:

@@ -16,7 +16,9 @@ An [OpenEnv](https://github.com/openenv/OpenEnv) environment where an LLM agent 
   - compressor wear: % loaded vs tonnage
 - **Alerts.** The building management system raises operator alarms (2-hour on-delay, late) and analytics alerts (instant, noisy, also fired by sensor blips).
 - **Maintenance.** The planner approves the agent's work orders and a technician comes. Technicians may not show up, and the compressor job waits 48 h for parts. The technician does the work named by the failure code, and everything is written back to the work-order store, where the agent can read it.
-- **Ending.** At day 60 or on `finish()`, the final `step()` observation carries `reward` = score and `metadata.result`, which has costs, failure prevented, false dispatches and detection delay.
+- **Ledger.** Every cost, downtime span, failure, alert and work-order transition is a typed event (`schemas.LedgerEvent`) in `Sim.events`; the score's totals and the proposal's five KPIs (downtime, missed failures, false dispatches, alert load, SLA breaches) are folds over it.
+- **Crew.** A scenario names its technicians, their skills and travel time. A job nobody on the crew can do waits 48 h for a contractor. Arriving later than the priority's response target is an SLA breach.
+- **Ending.** At day 60 or on `finish()`, the final `step()` observation carries `reward` = score and `metadata.result`, which has costs, failure prevented, false dispatches, detection delay and the KPIs.
 
 ## Score
 
@@ -75,6 +77,7 @@ Rewards only flow through `step()`, which is OpenEnv's simulation path. `list_to
 
 | file | what |
 |---|---|
+| `schemas.py` | the four team interfaces as pydantic models: scenario, simulator API, ledger events, agent tool list (draft; `tests/test_schemas.py` keeps them honest against the code) |
 | `server/sim.py` | chiller physics-lite, faults, blips, BMS rules, planner and technicians, cost ledger (pure, deterministic) |
 | `server/scenarios.py` | variants, reference runs, score |
 | `server/aob.py` | per-episode CouchDB databases and the stdio bridge to the AssetOpsBench servers |
@@ -89,8 +92,9 @@ Each line names its owner task on the team board.
 
 - **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise, and Dhaval's MATLAB failure-mode list replaces our three modes.
 - **Alerts live inside the gym** with fixed thresholds. The separate alert MCP server, with operator alarms vs analytics alerts, is T7.
-- **Cost priors are flat guesses**, not swept (T2).
-- **Work-order edits** after the technician arrives are ignored. A no-code request gets an inspection that never finds anything (T8).
-- **Each environment instance starts its own IoT and WO server processes** (about 10 s). The gym tools block the server's event loop while writing to CouchDB (T4, T10).
+- **Cost priors are flat guesses**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
+- **Work-order edits** after the technician arrives are ignored. A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
+- **Each environment instance starts its own IoT and WO server processes** (about 10 s). The AssetOpsBench servers read their database names from the environment at start, so sharing one server pair across episodes needs a change upstream (T4, T11).
+- **Wall-clock audit (T4).** Of the tools the gym exposes, only `generate_work_order` (reportdate), `cancel_workorder` (status_date) and `latest_reading` (age) read the real clock, and all three are rewritten to simulated time. The other clock readers in the WO server (`approve_workorder`, `assign_technician`, `close_workorder`, KPIs, calendar) are deliberately not exposed: the planner and technicians are simulated.
 - **No Docker image yet.** It needs CouchDB and AssetOpsBench beside the gym (T11).
 - **The agent keeps the whole conversation**, so prompt tokens grow quadratically with turns (T9, T10).
