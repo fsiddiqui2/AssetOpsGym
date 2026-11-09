@@ -364,7 +364,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             before = self.sim.now
             with self.prof.span("sim.run_to_end") as sp:
                 self.sim.run_to_end()  # ponytail: rows after an early finish are not written; nobody can read them
-                sp.set(sim_hours=(self.sim.now - before).total_seconds() / 3600)
+                sp.set(sim_hours_skipped=(self.sim.now - before)
+                       .total_seconds() / 3600)
             self.sim.changes.clear()
             r = self.sim.result()
             reactive, best = reference_costs(self.sim.v)
