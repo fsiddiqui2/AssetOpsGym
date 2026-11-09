@@ -8,7 +8,8 @@ from ..schemas import EpisodeResult, KPIs, SimState, WorkOrderState
 from .alerts import Alert
 from .faults import Fault, severity
 from .ledger import Ledger, costs, downtime_hours
-from .maintenance import Maintenance, repairing
+from .maintenance import (Maintenance, dispatched, repairing,
+                          status)
 from .variant import Variant
 
 
@@ -24,23 +25,23 @@ def state(v: Variant, now: datetime, f: Fault,
         work_orders=[
             WorkOrderState(
                 wonum=w.wonum, code=w.code, priority=w.priority,
-                status=w.status, emergency=w.emergency,
+                status=status(w), emergency=w.emergency,
                 created=w.created, tech=w.tech, arrive_at=w.arrive_at,
                 start_at=w.start_at, finish_at=w.finish_at,
-                dispatched=w.dispatched)
+                dispatched=dispatched(w))
             for w in m.wos.values()])
 
 
 def kpis(l: Ledger, f: Fault, m: Maintenance,
          alerts: list[Alert]) -> KPIs:
     """The proposal's five KPIs, folded over the ledger."""
-    dispatched = [w for w in m.wos.values() if w.dispatched]
+    sent = [w for w in m.wos.values() if dispatched(w)]
     return KPIs(
         downtime_hours=round(
             sum(downtime_hours(l.events).values()), 2),
         missed_failures=int(f.ever_failed),
         false_dispatches=sum(f.mode is None or w.code != f.mode
-                             for w in dispatched),
+                             for w in sent),
         alert_load=len(alerts),
         sla_breaches=sum(w.sla_breach for w in m.wos.values()))
 
@@ -48,12 +49,12 @@ def kpis(l: Ledger, f: Fault, m: Maintenance,
 def result(v: Variant, l: Ledger, f: Fault, m: Maintenance,
            alerts: list[Alert]) -> EpisodeResult:
     mode, onset = f.mode, f.onset
-    dispatched = [w for w in m.wos.values() if w.dispatched]
-    false = [w for w in dispatched if mode is None or w.code != mode]
+    sent = [w for w in m.wos.values() if dispatched(w)]
+    false = [w for w in sent if mode is None or w.code != mode]
     agent_hits = [w for w in m.wos.values()
                   if not w.emergency and w.code == mode
                   and onset is not None and w.created >= onset
-                  and w.status != "CAN"]
+                  and not w.canceled]
     cost = costs(l.events)
     delay = min(((w.created - onset).total_seconds() / 3600
                  for w in agent_hits), default=None)
@@ -64,7 +65,7 @@ def result(v: Variant, l: Ledger, f: Fault, m: Maintenance,
         cost_total=round(sum(cost.values()), 2),
         cost_breakdown={k: round(x, 2) for k, x in cost.items()},
         downtime_hours=downtime_hours(l.events),
-        dispatches=len(dispatched), false_dispatches=len(false),
+        dispatches=len(sent), false_dispatches=len(false),
         work_orders=len(m.wos),
         detection_delay_hours=(None if delay is None
                                else round(delay, 2)),

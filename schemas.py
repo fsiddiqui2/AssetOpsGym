@@ -114,8 +114,22 @@ class SimulatorAPI(Protocol):
     def advance(self, hours: float) -> list[TelemetryRow]: ...
     def inject_fault(self, fault: FaultInjection) -> None: ...
     def file_wo(self, code: Optional[str], priority: int = 3, wonum: Optional[str] = None): ...
-    def update_wo(self, wonum: str, code: Optional[str] = None, priority: Optional[int] = None,
-                  cancel: bool = False) -> None: ...
+    # AssetOpsBench's WO write tools, same arguments; raise GymError
+    def generate_work_order(
+        self, description: str, asset_num: str, site_id: str,
+        priority: int = 3, work_type: str = "CM",
+        reported_by: Optional[str] = None,
+        location: Optional[str] = None, notes: Optional[str] = None,
+        wonum: Optional[str] = None): ...
+    def update_workorder(
+        self, wonum: str, site_id: str,
+        description: Optional[str] = None,
+        priority: Optional[int] = None,
+        location: Optional[str] = None,
+        asset_num: Optional[str] = None, notes: Optional[str] = None,
+        failure_code: Optional[str] = None): ...
+    def cancel_workorder(self, wonum: str, site_id: str,
+                         reason: Optional[str] = None): ...
     def acknowledge(self, alert_id: str): ...
     def shelve(self, rule: str, hours: float) -> datetime: ...
     def state(self) -> SimState: ...
@@ -183,7 +197,9 @@ class AlertActionEvent(_Event):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ServiceRequestEvent(_Event):
-    """A work-order transition, whoever caused it."""
+    """A work-order change, whoever caused it. Carries the whole
+    work-order header, so the last event per wonum rebuilds the
+    WO document; the first one's time is its reportdate."""
 
     type: Literal["service_request"] = "service_request"
     wonum: str
@@ -196,6 +212,14 @@ class ServiceRequestEvent(_Event):
     # technician arrived later than the priority's response target
     sla_breach: bool = False
     note: Optional[str] = None
+    description: str
+    site: str
+    asset: str
+    work_type: str
+    location: Optional[str] = None
+    reported_by: Optional[str] = None
+    arrive_at: Optional[datetime] = None  # technician's scheduled arrival
+    labor_hours: Optional[float] = None  # on completion
 
 
 LedgerEvent = Union[CostEvent, DowntimeEvent, FailureEvent,
@@ -252,6 +276,9 @@ class ErrorCode(str, Enum):
     BAD_ARGUMENT = "BAD_ARGUMENT"
     NOT_FOUND = "NOT_FOUND"
     UNKNOWN_RULE = "UNKNOWN_RULE"
+    UNKNOWN_ASSET = "UNKNOWN_ASSET"
+    UNKNOWN_FAILURE_CODE = "UNKNOWN_FAILURE_CODE"
+    WORK_ORDER_LOCKED = "WORK_ORDER_LOCKED"  # technician arrived
 
 
 class GymError(Exception):

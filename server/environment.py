@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import logging
 import secrets
 import threading
 import uuid
@@ -42,8 +43,8 @@ from ..profiling import Profiler
 from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
                        ClockResult, EpisodeResult, ErrorCode,
                        ErrorResult, FinishResult, GymError,
-                       ListAlertsResult, ShelveResult, TelemetryRow,
-                       WorkOrderUpdate)
+                       ListAlertsResult, ServiceRequestEvent,
+                       ShelveResult, TelemetryRow, WorkOrderUpdate)
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
@@ -53,6 +54,7 @@ from .telemetry import ASSET, INSTALLED_SENSORS, SITE
 from .variant import Variant, iso
 
 MAX_ADVANCE_H = 168
+logger = logging.getLogger(__name__)
 
 INSTRUCTION = """You are the reliability engineer on call for site {site}. {asset} (chilled-water plant) streams its sensors every 15 minutes into the IoT store; history starts {history_start}.
 
@@ -255,6 +257,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             with self.prof.span("sim.history"):
                 self.sim = Sim(v)
             self._result, self._profile = None, None
+            self._wo_seen = 0  # events already mirrored to CouchDB
             with self.prof.span("couch.recreate"):
                 self.couch.recreate()
                 self.couch.bulk("asset", [_asset_doc()])
@@ -411,11 +414,13 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         """The WO server's update_workorder(notes=...) replaces the long description, which is
         also where the planner and technicians write. Rebuild it: their log, then the agent's note."""
         wonum = arguments.get("wonum")
-        wo = self.sim.wos.get(wonum)
         doc = self.couch.get("wo", f"wo:{(arguments.get('site_id') or SITE).upper()}:{wonum}")
         if doc is None:
             return
-        log = "\n".join(wo.notes) if wo else ""
+        log = "\n".join(
+            _wo_log(e) for e in self.sim.events
+            if isinstance(e, ServiceRequestEvent) and e.wonum == wonum
+            and e.actor != "agent")
         doc["description_longdescription"] = (log + "\n" if log else "") + \
             f"[{iso(self.sim.now)}] Agent: {arguments['notes']}"
         self.couch.put("wo", doc)
@@ -442,49 +447,63 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         """Feed the agent's work-order writes (made through the WO server) into the simulator."""
         for doc in self.couch.find("wo", {"type": "workorder"}):
             wonum, cancel = doc["wonum"], doc.get("status") == "CAN"
-            if wonum in self.sim.wos:
-                self.sim.update_wo(wonum, code=doc.get("failurecode"), priority=doc.get("wopriority"),
-                                   cancel=cancel)
-            elif not cancel and doc.get("assetnum") == ASSET:
-                self.sim.file_wo(doc.get("failurecode"), doc.get("wopriority", 3), wonum=wonum)
+            wo = self.sim.wos.get(wonum)
+            try:
+                if wo is None:
+                    if not cancel and doc.get("assetnum") == ASSET:
+                        self.sim.file_wo(doc.get("failurecode"),
+                                         doc.get("wopriority", 3),
+                                         wonum=wonum)
+                elif cancel:
+                    if not wo.canceled:
+                        self.sim.cancel_workorder(wonum, SITE)
+                else:
+                    self.sim.update_workorder(
+                        wonum, SITE, priority=doc.get("wopriority"),
+                        failure_code=doc.get("failurecode"))
+            except GymError as e:  # ponytail: wave 3b returns it to the agent
+                logger.warning("work order %s not applied: %s",
+                               wonum, e.message)
 
     def _flush_changes(self) -> list[WorkOrderUpdate]:
-        """Write the maintenance organization's work-order updates back to CouchDB."""
+        """Mirror the planner's, crew's and BMS's work-order events to
+        CouchDB; the agent's own writes went through the WO server."""
+        new = self.sim.events[self._wo_seen:]
+        self._wo_seen = len(self.sim.events)
         updates = []
-        for c in self.sim.changes:
-            doc_id = f"wo:{SITE}:{c['wonum']}"
-            if c.get("new"):
-                doc = {"_id": doc_id, "type": "workorder", "schema_version": "1.0.0", "wonum": c["wonum"],
-                       "siteid": SITE, "description": c["description"], "assetnum": ASSET,
-                       "wopriority": c["priority"], "worktype": c["work_type"], "status": c["status"],
-                       "reportdate": _wo_time(c["reportdate"]), "reportedby": c["reported_by"],
-                       "failurecode": c["failurecode"]}
-                self.couch.put("wo", doc)
-                updates.append(WorkOrderUpdate(
-                    wonum=c["wonum"], status=c["status"],
-                    time=c["reportdate"], note=c["description"]))
+        for e in new:
+            if (not isinstance(e, ServiceRequestEvent)
+                    or e.actor == "agent"):
                 continue
-            doc = self.couch.get("wo", doc_id)
-            if doc is None:
-                continue
-            doc["status"], doc["wopriority"] = c["status"], c["priority"]
-            doc["status_date"] = _wo_time(c["time"])
-            if "labor" in c:
-                tech, start = c["labor"]
-                doc.setdefault("wplabor", []).append({"laborcode": tech, "craft": "HVAC", "startdate": _wo_time(start)})
-            if "finish" in c:
-                doc["actfinish"], doc["actlabhrs"] = _wo_time(c["finish"]), c["hours"]
-            if c.get("failurecode"):
-                doc["failurecode"] = c["failurecode"]
-            if c.get("notes"):
-                log = doc.get("description_longdescription") or ""
-                doc["description_longdescription"] = (log + "\n" if log else "") + f"[{iso(c['time'])}] {c['notes']}"
-            self.couch.put("wo", doc)
+            self.couch.put("wo", self._wo_doc(e))
             updates.append(WorkOrderUpdate(
-                wonum=c["wonum"], status=c["status"], time=c["time"],
-                note=c.get("notes")))
-        self.sim.changes.clear()
+                wonum=e.wonum, status=e.status, time=e.time,
+                note=e.note))
         return updates
+
+    def _wo_doc(self, e: ServiceRequestEvent) -> dict:
+        doc = self.couch.get("wo", f"wo:{e.site}:{e.wonum}") or {
+            "_id": f"wo:{e.site}:{e.wonum}", "type": "workorder",
+            "schema_version": "1.0.0", "wonum": e.wonum,
+            "siteid": e.site, "description": e.description,
+            "assetnum": e.asset, "worktype": e.work_type,
+            "reportdate": _wo_time(e.time),
+            "reportedby": e.reported_by}
+        doc["status"], doc["wopriority"] = e.status, e.priority
+        doc["status_date"] = _wo_time(e.time)
+        if e.code:
+            doc["failurecode"] = e.code
+        if e.arrive_at:
+            doc["wplabor"] = [{"laborcode": e.tech, "craft": "HVAC",
+                               "startdate": _wo_time(e.arrive_at)}]
+        if e.labor_hours is not None:
+            doc["actfinish"] = _wo_time(e.time)
+            doc["actlabhrs"] = e.labor_hours
+        if e.note:
+            old = doc.get("description_longdescription")
+            doc["description_longdescription"] = (
+                f"{old}\n" if old else "") + _wo_log(e)
+        return doc
 
     def _write_rows(self, rows: list[TelemetryRow]) -> None:
         self.couch.bulk("iot", [
@@ -500,7 +519,6 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 self.sim.run_to_end()  # ponytail: rows after an early finish are not written; nobody can read them
                 sp.set(sim_hours_skipped=(self.sim.now - before)
                        .total_seconds() / 3600)
-            self.sim.changes.clear()
             r = self.sim.result()
             reactive, best = reference_costs(self.sim.v)
             r = replace(r, score=score(self.sim.v, r.cost_total),
@@ -528,6 +546,10 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             obs.metadata = {**obs.metadata, "result": {
                 **to_jsonable_python(r), "profile": self._profile}}
         return obs
+
+
+def _wo_log(e: ServiceRequestEvent) -> str:
+    return f"[{iso(e.time)}] {e.note}"
 
 
 def _asset_doc() -> dict:
