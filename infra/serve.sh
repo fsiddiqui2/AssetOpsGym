@@ -10,5 +10,5 @@ command -v uv >/dev/null ||
   curl -LsSf https://astral.sh/uv/install.sh | sh
 # hermes = Qwen2.5's tool-call format; the agent needs it
 exec uvx --python 3.12 --from "vllm==$VLLM" vllm serve \
-  "$MODEL" --port 8000 --max-model-len 8192 \
+  "$MODEL" --port 8000 --max-model-len 32768 \
   --enable-auto-tool-choice --tool-call-parser hermes "$@"
