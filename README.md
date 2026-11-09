@@ -83,7 +83,7 @@ WANDB_PROJECT=assetopsgym uv run python -m assetopsgym.agent --variant refleak_m
 uv sync --extra profile                             # wandb
 ```
 
-Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are dotted and the first segment groups them (`env`, `tool`, `sim`, `couch`, `mcp`, `llm`, `client`). GPU numbers come from the vLLM host: its `/metrics` endpoint (KV-cache use, running and waiting requests) and W&B system metrics for a run there. For the inference side, run the vLLM server under `nsys profile -t cuda,nvtx -o vllm` and read the PyTorch Profiler trace vLLM writes when started with `VLLM_TORCH_PROFILER_DIR`; W&B's system metrics cover GPU utilization when the run lives on the GPU host.
+Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are dotted and the first segment groups them (`env`, `tool`, `sim`, `couch`, `mcp`, `llm`, `client`). `profiling.GPUSampler` polls nvidia-smi for utilization and memory on the serving host. For the inference side, run the vLLM server under `nsys profile -t cuda,nvtx -o vllm` and read the PyTorch Profiler trace vLLM writes when started with `VLLM_TORCH_PROFILER_DIR`; W&B's system metrics cover GPU utilization when the run lives on the GPU host.
 
 ## Layout
 
