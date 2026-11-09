@@ -44,10 +44,10 @@ W&B: `WANDB_ENTITY=hpml-projects WANDB_PROJECT=assetopsgym`
   reads `c["wonum"]`, `c.get("new")`, `"labor" in c`.
 - **One source of truth.** Every list (tools, variants,
   sensors, failure codes) is defined once; everything
-  else derives from it, and a test checks external copies
-  (`openenv.yaml`). Counter-example: the agent's tool list
-  lives in `IOT_TOOLS`/`WO_TOOLS`, `AGENT_TOOLS` and
-  `openenv.yaml`.
+  else derives from it or is checked against it. Example:
+  the agent's tool list is `declared_tools` in
+  `openenv.yaml`; the environment reads it at import and
+  refuses to boot if its registered tools differ.
 - **No hand-written finite state machines** (state enum +
   transition table / `if state == ...` ladders) for
   control flow. External status fields (Maximo WO status

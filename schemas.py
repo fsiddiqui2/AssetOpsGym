@@ -7,7 +7,7 @@ dataclasses internally; these are the contracts T2, T4, T7 and T8 write to.
     1. Scenario          what one task variant specifies           (T1, T2)
     2. Simulator API     advance, inject a fault, repair, read state (T5, T6, T8)
     3. Ledger events     costs, downtime, failures, alerts, requests (T2, T7, T8)
-    4. Agent tool list   AOB tools plus the gym's own                (T3, T4, T9)
+    4. Agent tool results  what the gym's own tools return     (T3, T4, T9)
 """
 
 from __future__ import annotations
@@ -292,37 +292,8 @@ class EpisodeResult(BaseModel):
 
 
 # ----------------------------------------------------------------------------
-# 4. Agent tool list
+# 4. Agent tool results (the tool list is openenv.yaml)
 # ----------------------------------------------------------------------------
-
-
-class ToolSpec(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    name: str
-    server: Literal["gym", "iot", "wo", "alerts"]
-    purpose: str
-
-
-AGENT_TOOLS: list[ToolSpec] = [
-    ToolSpec(name="current_time", server="gym", purpose="simulated now and the shift end"),
-    ToolSpec(name="advance_time", server="gym", purpose="the only thing that moves the clock (0.25-168 h)"),
-    ToolSpec(name="list_alerts", server="alerts",
-             purpose="BMS alerts so far, shelved ones hidden"),
-    ToolSpec(name="acknowledge_alert", server="alerts",
-             purpose="mark an alert as seen"),
-    ToolSpec(name="shelve_alert", server="alerts",
-             purpose="hide a rule's new alerts for 0.25-168 h"),
-    ToolSpec(name="finish", server="gym", purpose="end the shift; the rest is simulated"),
-    *[ToolSpec(name=n, server="iot", purpose="AssetOpsBench IoT server, read-only") for n in (
-        "sites", "asset_ids", "asset_detail", "assets", "installed_sensors", "measured_sensors",
-        "stream_extent", "history", "latest_reading", "sensor_stats", "sensor_coverage")],
-    *[ToolSpec(name=n, server="wo", purpose="AssetOpsBench work-order server") for n in (
-        "list_workorders", "get_workorder", "get_failure_codes", "generate_work_order",
-        "update_workorder", "cancel_workorder")],
-]
-# Deliberately not exposed: approve_workorder, assign_technician, close_workorder (the planner and
-# technicians are simulated, T8), and the KPI / calendar tools (they read the wall clock).
 
 
 class ClockResult(BaseModel):

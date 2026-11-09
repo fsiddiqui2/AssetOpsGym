@@ -21,9 +21,12 @@ import secrets
 import threading
 import uuid
 from dataclasses import replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
+import yaml
 from fastmcp import FastMCP
 from fastmcp.tools import Tool as FastMCPTool
 from fastmcp.tools.tool import ToolResult
@@ -42,10 +45,6 @@ from .sim import Sim
 from .telemetry import ASSET, INSTALLED_SENSORS, SITE
 from .variant import Variant, iso
 
-IOT_TOOLS = ("sites", "asset_ids", "asset_detail", "assets", "installed_sensors", "measured_sensors",
-             "stream_extent", "history", "latest_reading", "sensor_stats", "sensor_coverage")
-WO_TOOLS = ("list_workorders", "get_workorder", "get_failure_codes", "generate_work_order",
-            "update_workorder", "cancel_workorder")
 MAX_ADVANCE_H = 168
 
 INSTRUCTION = """You are the reliability engineer on call for site {site}. {asset} (chilled-water plant) streams its sensors every 15 minutes into the IoT store; history starts {history_start}.
@@ -59,6 +58,31 @@ acknowledge_alert marks an alert as seen; shelve_alert hides a rule's new alerts
 If you believe a fault is developing, open a corrective work order for asset {asset} at site {site} with generate_work_order and set its failure code with update_workorder (get_failure_codes lists them). The maintenance planner approves work orders and dispatches a technician; follow progress with get_workorder. The technician performs the work named by the failure code. Every technician visit costs money, and an unplanned chiller trip costs far more than planned work.
 
 When you are done, call finish; the rest of the {days} days is then simulated without you."""
+
+
+@dataclass(frozen=True, slots=True)
+class Manifest:
+    name: str
+    tools: tuple[str, ...]  # declared_tools: what the agent sees
+
+
+def load_manifest(path: Path) -> Manifest:
+    m = yaml.safe_load(path.read_text())
+    tools = m["validation"]["capabilities"]["declared_tools"]
+    return Manifest(name=m["name"], tools=tuple(tools))
+
+
+MANIFEST = load_manifest(
+    Path(__file__).resolve().parents[1] / "openenv.yaml")
+
+
+def check_tools(registered: list[str],
+                declared: tuple[str, ...]) -> None:
+    if sorted(registered) != sorted(declared):
+        raise RuntimeError(
+            "registered tools != openenv.yaml declared_tools; "
+            f"missing {sorted(set(declared) - set(registered))}, "
+            f"undeclared {sorted(set(registered) - set(declared))}")
 
 
 class GymState(State):
@@ -116,25 +140,22 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     SUPPORTS_CONCURRENT_SESSIONS = True
 
     def __init__(self, max_steps: int = 400):
-        mcp = FastMCP("assetopsgym")
+        mcp = FastMCP(MANIFEST.name)
         env = self
 
         # The clock tools run in a worker thread so CouchDB writes don't block the server's
         # event loop (other sessions keep stepping); the lock keeps this episode's simulator
         # single-threaded.
-        @mcp.tool
         async def current_time() -> dict:
             """Current simulated time and the end of your shift (ISO 8601, UTC)."""
             return await asyncio.to_thread(env._locked, env._clock)
 
-        @mcp.tool
         async def advance_time(hours: float) -> dict:
             """Let simulated time pass, between 0.25 and 168 hours. New telemetry lands in the IoT
             store and the maintenance organization works its queue. Returns the new time, the alerts
             raised meanwhile and any work-order updates."""
             return await asyncio.to_thread(env._locked, env._advance, hours)
 
-        @mcp.tool
         async def list_alerts(since: Optional[str] = None,
                         kind: Optional[str] = None, limit: int = 50,
                         unacked_only: bool = False) -> dict:
@@ -151,12 +172,10 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 env._locked, env._alerts, since, kind, limit,
                 unacked_only)
 
-        @mcp.tool
         async def acknowledge_alert(alert_id: str) -> dict:
             """Mark an alert as seen, by its id (e.g. "AL17")."""
             return await asyncio.to_thread(env._locked, env._ack, alert_id)
 
-        @mcp.tool
         async def shelve_alert(rule: str, hours: float) -> dict:
             """Hide new alerts of one rule (e.g.
             "low_condenser_water_flow") for 0.25-168 hours. The rule
@@ -164,11 +183,14 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return await asyncio.to_thread(
                 env._locked, env._shelve, rule, hours)
 
-        @mcp.tool
         async def finish() -> dict:
             """End your shift now. The rest of the horizon is simulated without you and the episode is scored."""
             return await asyncio.to_thread(env._locked, env._finish)
 
+        gym = (current_time, advance_time, list_alerts,
+               acknowledge_alert, shelve_alert, finish)
+        for fn in gym:
+            mcp.tool(fn)
         super().__init__(mcp)
         self.max_steps = max_steps
         self._lock = threading.Lock()
@@ -178,13 +200,15 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             self.couch.recreate()
             self.bridge = AOBBridge(self.couch.server_env())
         self.proxied: dict[str, str] = {}  # tool name -> AssetOpsBench server
-        for server, allow in (("iot", IOT_TOOLS), ("wo", WO_TOOLS)):
+        own = {fn.__name__ for fn in gym}
+        for server in self.bridge.sessions:
             for t in self.bridge.list_tools(server):
-                if t.name in allow:
+                if t.name in MANIFEST.tools and t.name not in own:
                     self.proxied[t.name] = server
                     mcp.add_tool(_ForwardTool(name=t.name, description=t.description or "",
                                               parameters=t.inputSchema, output_schema=_WRAPPED_OUTPUT,
                                               forward=self._call_proxied))
+        check_tools([*own, *self.proxied], MANIFEST.tools)
         self.sim: Sim | None = None
         self._result: dict | None = None
         self._state = GymState(episode_id=str(uuid.uuid4()))

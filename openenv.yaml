@@ -18,6 +18,10 @@ validation:
   capabilities:
     verifier:
       kind: reward_channel
+    # The agent's tool list, read by server/environment.py; boot fails if
+    # the registered tools differ. Not exposed: approve_workorder,
+    # assign_technician, close_workorder (planner and technicians are
+    # simulated) and the KPI/calendar tools (they read the wall clock).
     declared_tools: [current_time, advance_time, list_alerts, acknowledge_alert,
                      shelve_alert, finish, sites, asset_ids, asset_detail, assets,
                      installed_sensors, measured_sensors, stream_extent, history, latest_reading, sensor_stats,

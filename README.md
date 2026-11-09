@@ -9,8 +9,8 @@ An [OpenEnv](https://github.com/openenv/OpenEnv) environment where an LLM agent 
 - **Tools.**
   - AssetOpsBench IoT tools: `history`, `sensor_stats`, `latest_reading`, …
   - AssetOpsBench work-order tools: `generate_work_order`, `update_workorder`, `get_workorder`, …
-  - Gym tools: `current_time`, `advance_time`, `finish`.
-  - Alert tools: `list_alerts`, `acknowledge_alert`, `shelve_alert` (in-process, `server="alerts"` in `schemas.AGENT_TOOLS`).
+  - Gym tools (in-process): `current_time`, `advance_time`, `finish`, and the alert tools `list_alerts`, `acknowledge_alert`, `shelve_alert`.
+  - The list the agent sees is `declared_tools` in `openenv.yaml`; the environment refuses to boot if its tools differ.
 - **Faults.** One latent fault per faulty variant grows from its onset until the chiller trips. Its primary sensor:
   - condenser flow restriction: condenser water flow
   - refrigerant leak: evaporator approach
