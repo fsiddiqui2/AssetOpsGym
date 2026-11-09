@@ -42,6 +42,9 @@ def test_only_the_past_is_stored(env):
     call(env, "advance_time", hours=24)
     extent, _ = call(env, "stream_extent", site_name="MAIN", asset_id="Chiller 6")
     assert extent["end_time"] == "2026-06-01T23:45:00"
+    latest, _ = call(env, "latest_reading", site_name="MAIN",
+                     asset_id="Chiller 6")
+    assert latest["age_seconds"] == 900  # sim time, not wall clock
 
 
 def test_do_nothing_scores_zero(env):
@@ -72,6 +75,41 @@ def test_oracle_through_the_wo_server_scores_one(env):
     _, obs = call(env, "finish")
     assert obs.done and obs.reward >= 0.95
     assert obs.metadata["result"]["failure_prevented"]
+
+
+def test_gym_owns_the_work_order_writes(env):
+    aob = {t.name for t in env.bridge.list_tools("wo")}
+    writes = {"generate_work_order", "update_workorder",
+              "cancel_workorder", "approve_workorder",
+              "assign_technician", "close_workorder"}
+    assert "get_workorder" in aob and not aob & writes
+    assert not set(env.proxied) & writes
+    env.reset(variant="healthy", seed=1)
+    bad, _ = call(env, "generate_work_order", description="x",
+                  asset_num="Chiller6", site_id="MAIN")
+    assert bad["error_code"] == "UNKNOWN_ASSET", bad
+    wo, _ = call(env, "generate_work_order", description="Check",
+                 asset_num="Chiller 6", site_id="MAIN", priority=1)
+    filed = "2026-06-01T00:00:00+00:00"
+    assert wo["status"] == "WAPPR"
+    assert wo["work_order"]["reportdate"] == filed
+    num = wo["wonum"]
+    up, _ = call(env, "update_workorder", wonum=num, site_id="MAIN",
+                 failure_code="CH-SENSOR")
+    assert up["work_order"]["failurecode"] == "CH-SENSOR"
+    out, _ = call(env, "advance_time", hours=72)
+    got, _ = call(env, "get_workorder", wonum=num, site_id="MAIN")
+    w = got["work_order"]
+    since = next(u["time"] for u in out["work_order_updates"]
+                 if u["status"] == w["status"])
+    assert w["status"] in ("INPRG", "COMP") and w["reportdate"] == filed
+    assert w["status_date"] == since + "+00:00"
+    listed, _ = call(env, "list_workorders", site_id="MAIN")
+    assert [x["status"] for x in listed["work_orders"]] == [w["status"]]
+    for name, args in (("update_workorder", {"priority": 5}),
+                       ("cancel_workorder", {})):
+        locked, _ = call(env, name, wonum=num, site_id="MAIN", **args)
+        assert locked["error_code"] == "WORK_ORDER_LOCKED", locked
 
 
 def test_alert_tools(env):

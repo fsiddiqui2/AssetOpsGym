@@ -363,6 +363,77 @@ class ShelveResult:
 
 
 @dataclass(frozen=True, slots=True)
+class LaborLine:
+    laborcode: Optional[str] = None
+    craft: Optional[str] = None
+    laborhrs: Optional[float] = None
+    startdate: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkOrderItem:
+    """AssetOpsBench's WorkOrderItem as its WO server returns it
+    (every field, None when unset, then the CouchDB doc's own
+    keys), and the document the gym mirrors to CouchDB. Dates
+    are strings in its format, 2026-06-01T00:00:00+00:00."""
+
+    wonum: Optional[str] = None
+    description: Optional[str] = None
+    description_longdescription: Optional[str] = None
+    siteid: Optional[str] = None
+    orgid: Optional[str] = None
+    assetnum: Optional[str] = None
+    location: Optional[str] = None
+    status: Optional[str] = None
+    status_date: Optional[str] = None
+    worktype: Optional[str] = None
+    wopriority: Optional[int] = None
+    reportdate: Optional[str] = None
+    reportedby: Optional[str] = None
+    failurecode: Optional[str] = None
+    parent: Optional[str] = None
+    taskid: Optional[int] = None
+    lead: Optional[str] = None
+    jpnum: Optional[str] = None
+    schedstart: Optional[str] = None
+    schedfinish: Optional[str] = None
+    targstartdate: Optional[str] = None
+    targcompdate: Optional[str] = None
+    actstart: Optional[str] = None
+    actfinish: Optional[str] = None
+    estlabhrs: Optional[float] = None
+    actlabhrs: Optional[float] = None
+    estlabcost: Optional[float] = None
+    actlabcost: Optional[float] = None
+    estmatcost: Optional[float] = None
+    actmatcost: Optional[float] = None
+    estservcost: Optional[float] = None
+    actservcost: Optional[float] = None
+    esttoolcost: Optional[float] = None
+    acttoolcost: Optional[float] = None
+    estatapprtotalcost: Optional[float] = None
+    esttotalcost: Optional[float] = None
+    acttotalcost: Optional[float] = None
+    wplabor: Optional[list[LaborLine]] = None
+    aob_source: Optional[dict[str, str]] = None
+    aob_asset_class: Optional[str] = None
+    _id: Optional[str] = None
+    type: str = "workorder"
+    schema_version: str = "1.0.0"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkOrderMutationResult:
+    """What AssetOpsBench's WO write tools return."""
+
+    wonum: str
+    siteid: str
+    status: WoStatus
+    work_order: WorkOrderItem
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class FinishResult:
     message: str
     score: float

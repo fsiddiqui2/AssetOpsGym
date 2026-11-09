@@ -1,4 +1,5 @@
-"""The work-order heap and the AssetOpsBench-shaped writes. Pure."""
+"""The work-order heap, the AssetOpsBench-shaped writes and the
+WO document folded from the events. Pure."""
 
 from dataclasses import replace
 from datetime import timedelta
@@ -7,6 +8,7 @@ import pytest
 
 from assetopsgym.schemas import CostEvent, ErrorCode, GymError
 from assetopsgym.server.maintenance import NOSHOW_DELAY_H, status
+from assetopsgym.server.mirror import work_order_item
 from assetopsgym.server.scenarios import VARIANTS
 from assetopsgym.server.sim import Sim
 
@@ -75,3 +77,22 @@ def test_bad_writes_raise():
         with pytest.raises(GymError) as e:
             write()
         assert e.value.code == ErrorCode.WORK_ORDER_LOCKED
+
+
+def test_work_order_document_is_a_fold_over_events():
+    sim = sim_with(noshow=0.0)
+    wo = sim.generate_work_order("check", "Chiller 6", "MAIN",
+                                 priority=1, notes="smells")
+    sim.update_workorder(wo.wonum, "MAIN", failure_code="CH-SENSOR")
+    filed = work_order_item(sim.events, wo.wonum)
+    assert filed.status == "WAPPR" and filed.failurecode == "CH-SENSOR"
+    assert filed.reportdate == "2026-06-01T00:00:00+00:00"
+    assert filed.status_date == filed.reportdate
+    assert filed.wplabor is None and filed.actfinish is None
+    sim.advance(168)
+    done = work_order_item(sim.events, wo.wonum)
+    assert done.status == "COMP" and done.reportdate == filed.reportdate
+    assert done.actfinish == done.status_date
+    assert done.wplabor[0].laborcode == wo.tech
+    log = done.description_longdescription.splitlines()
+    assert log[0] == "[2026-06-01T00:00:00] smells" and len(log) == 5
