@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import random
+import secrets
 import threading
 import uuid
 from dataclasses import replace
@@ -60,9 +60,24 @@ When you are done, call finish; the rest of the {days} days is then simulated wi
 
 class GymState(State):
     variant: str = ""
+    seed: int = 0  # replays the run: reset(variant, seed)
     sim_time: str = ""
     finished: bool = False
     score: Optional[float] = None
+
+
+def pick_variant(variant: Optional[str],
+                 seed: Optional[int]) -> Variant:
+    """Neither given: a seed from the OS, then as if given."""
+    if variant is None and seed is None:
+        seed = secrets.randbelow(2**31)
+    if variant is None:
+        ids = sorted(VARIANTS)
+        variant = ids[seed % len(ids)]
+    v = VARIANTS[variant]
+    if seed is None:
+        return v
+    return replace(v, seed=seed)  # also keys the reference_costs cache
 
 
 def _wo_time(t: datetime) -> str:
@@ -172,12 +187,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     # ---- OpenEnv API ------------------------------------------------------
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None,
               variant: Optional[str] = None, **kwargs: Any) -> Observation:
-        if variant is None:
-            ids = sorted(VARIANTS)
-            variant = ids[seed % len(ids)] if seed is not None else random.choice(ids)
-        v = VARIANTS[variant]
-        if seed is not None:
-            v = replace(v, seed=seed)  # also keys the reference_costs cache
+        v = pick_variant(variant, seed)
         episode_id = episode_id or str(uuid.uuid4())
         boot = self.prof.total("env.boot")
         self.prof.reset(episode_id)
@@ -195,14 +205,17 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 self._write_rows(self.sim.history)
             with self.prof.span("sim.reference_runs"):
                 reference_costs(v)  # warm the score's reference runs now, not at the last step
-        self._state = GymState(episode_id=episode_id, step_count=0, variant=v.id, sim_time=iso(self.sim.now))
+        self._state = GymState(
+            episode_id=episode_id, step_count=0, variant=v.id,
+            seed=v.seed, sim_time=iso(self.sim.now))
         text = INSTRUCTION.format(site=SITE, asset=ASSET, now=iso(self.sim.now), end=iso(v.end),
                                   days=v.horizon_days, max_h=MAX_ADVANCE_H,
                                   max_shelve=MAX_SHELVE_H,
                                   history_start=iso(v.start - timedelta(days=v.history_days)))
         return Observation(done=False, reward=0.0, metadata={
             "instruction": text, "site": SITE, "asset": ASSET, "episode_id": episode_id,
-            "sim_time": iso(self.sim.now), "shift_end": iso(v.end)})
+            "seed": v.seed, "sim_time": iso(self.sim.now),
+            "shift_end": iso(v.end)})
 
     # Rewards and termination only flow through step(), OpenEnv's simulation path;
     # direct /mcp calls reach the same tools without them.
