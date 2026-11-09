@@ -4,7 +4,7 @@ import json
 import threading
 import time
 
-from assetopsgym.profiling import GPUSampler, Profiler, flatten
+from assetopsgym.profiling import Profiler, flatten
 
 
 def test_spans_nest_per_thread_and_fold_by_name():
@@ -58,22 +58,13 @@ def test_agent_side_derived_metrics():
     assert d["sim_hours_per_wall_s"] > 0
 
 
-def test_timed_decorator_add_and_cap():
+def test_span_cap_drops_and_counts():
     p = Profiler(max_spans=3)
-
-    @p.timed("sim.tick")
-    def tick():
-        return 1
-
-    assert tick() == 1
-    p.add("llm.chat", 0.5, prompt_tokens=10, completion_tokens=1)
-    with p.span("env.step"):
-        pass
-    with p.span("env.step"):  # fourth span: dropped, counted
-        pass
+    for _ in range(4):
+        with p.span("env.step"):
+            pass
     s = p.summary()
     assert s["spans"] == 3 and s["dropped"] == 1
-    assert s["by_name"]["llm.chat"]["seconds"] == 0.5 and s["derived"]["prompt_tokens"] == 10
 
 
 def test_threads_keep_their_own_stacks():
@@ -107,10 +98,5 @@ def test_emit_writes_jsonl_only_when_configured(tmp_path, monkeypatch):
     assert len(lines) == 1 and json.loads(lines[0])["episode_id"] == "e"
 
 
-def test_flatten_and_gpu_sampler_without_a_gpu():
+def test_flatten():
     assert flatten({"a": {"b": 1, "c": {"d": "x"}}, "e": None, "f": [1]}) == {"a/b": 1, "a/c/d": "x", "e": None}
-    g = GPUSampler(interval_s=0.01)
-    g.available = False  # whatever the host has, exercise the absent path
-    g.start()
-    g.stop()
-    assert g.summary() == {"available": False, "samples": 0}

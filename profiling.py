@@ -34,23 +34,20 @@ Span names are dotted; the first segment is the stage. The ones the code emits:
     llm.chat                                agent side (attrs: prompt_tokens, completion_tokens)
     client.step                             agent side, one env.step over HTTP (attrs: tool)
 
-GPU utilisation and memory come from `GPUSampler`, which polls nvidia-smi on the
-serving host; on a machine without one it reports `available: False`.
+GPU numbers come from the serving host: vLLM's /metrics (KV-cache use,
+running and waiting requests) and W&B system metrics for a run there.
 """
 
 from __future__ import annotations
 
-import functools
 import json
 import os
-import shutil
-import subprocess
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 
 @dataclass
@@ -115,33 +112,10 @@ class Profiler:
                 else:
                     self.dropped += 1
 
-    def timed(self, name: str, **attrs: Any) -> Callable:
-        """Decorator form of span()."""
-        def deco(fn):
-            @functools.wraps(fn)
-            def wrapper(*a, **kw):
-                with self.span(name, **attrs):
-                    return fn(*a, **kw)
-            return wrapper
-        return deco
-
-    def add(self, name: str, seconds: float, **attrs: Any) -> None:
-        """Record a span measured elsewhere (e.g. a server-reported latency)."""
-        now = time.perf_counter()
-        with self._lock:
-            if len(self.spans) < self.max_spans:
-                self.spans.append(Span(name, now - seconds, now, attrs=attrs))
-            else:
-                self.dropped += 1
-
     # ---- folding ------------------------------------------------------------
     def total(self, prefix: str) -> float:
         with self._lock:
             return sum(s.seconds for s in self.spans if s.name == prefix or s.name.startswith(prefix + "."))
-
-    def attr_sum(self, key: str) -> float:
-        with self._lock:
-            return sum(float(s.attrs[key]) for s in self.spans if isinstance(s.attrs.get(key), (int, float)))
 
     def summary(self) -> dict:
         with self._lock:
@@ -235,68 +209,3 @@ def wandb_run():
     _wandb_run = wandb.run or wandb.init(project=os.environ["WANDB_PROJECT"], job_type="profile",
                                          config={k: v for k, v in os.environ.items() if k.startswith("AOG_")})
     return _wandb_run
-
-
-class GPUSampler:
-    """Polls nvidia-smi for utilisation and memory on a background thread.
-
-        g = GPUSampler(interval_s=1.0).start()
-        ...
-        g.stop(); g.summary()  # {"available": True, "samples": n, "util_mean": .., "mem_used_mb_max": ..}
-
-    W&B's own system metrics cover the same thing when the run lives on the GPU host; this
-    is for runs where the agent and the environment sit on a machine other than the server.
-    """
-
-    QUERY = "--query-gpu=index,utilization.gpu,memory.used,memory.total"
-
-    def __init__(self, interval_s: float = 1.0):
-        self.interval_s = interval_s
-        self.samples: list[dict] = []
-        self.available = shutil.which("nvidia-smi") is not None
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def sample_once(self) -> list[dict]:
-        if not self.available:
-            return []
-        try:
-            out = subprocess.run(["nvidia-smi", self.QUERY, "--format=csv,noheader,nounits"],
-                                 capture_output=True, text=True, timeout=5).stdout
-        except (OSError, subprocess.SubprocessError):
-            self.available = False
-            return []
-        rows = []
-        for line in out.strip().splitlines():
-            try:
-                idx, util, used, total = (float(x) for x in line.split(","))
-            except ValueError:
-                continue
-            rows.append({"t": time.time(), "gpu": int(idx), "util": util, "mem_used_mb": used, "mem_total_mb": total})
-        return rows
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            self.samples.extend(self.sample_once())
-            self._stop.wait(self.interval_s)
-
-    def start(self) -> "GPUSampler":
-        if self.available and self._thread is None:
-            self._thread = threading.Thread(target=self._loop, daemon=True)
-            self._thread.start()
-        return self
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(self.interval_s + 5)
-
-    def summary(self) -> dict:
-        if not self.samples:
-            return {"available": self.available, "samples": 0}
-        util = [s["util"] for s in self.samples]
-        mem = [s["mem_used_mb"] for s in self.samples]
-        return {"available": True, "samples": len(self.samples), "gpus": len({s["gpu"] for s in self.samples}),
-                "util_mean": round(sum(util) / len(util), 1), "util_max": max(util),
-                "mem_used_mb_mean": round(sum(mem) / len(mem)), "mem_used_mb_max": max(mem),
-                "mem_total_mb": self.samples[-1]["mem_total_mb"]}
