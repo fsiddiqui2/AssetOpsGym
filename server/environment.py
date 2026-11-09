@@ -32,6 +32,7 @@ from pydantic.json_schema import SkipJsonSchema
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.types import Action, Observation, State
 
+from ..profiling import Profiler
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .sim import ASSET, FAILURE_CODES, INSTALLED_SENSORS, SITE, Sim, Variant, iso
@@ -130,9 +131,11 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         super().__init__(mcp)
         self.max_steps = max_steps
         self._lock = threading.Lock()
-        self.couch = Couch(f"aog_{uuid.uuid4().hex[:10]}")
-        self.couch.recreate()
-        self.bridge = AOBBridge(self.couch.server_env())
+        self.prof = Profiler()  # one episode at a time; reset() starts a new collection
+        with self.prof.span("env.boot"):
+            self.couch = Couch(f"aog_{uuid.uuid4().hex[:10]}")
+            self.couch.recreate()
+            self.bridge = AOBBridge(self.couch.server_env())
         self.proxied: dict[str, str] = {}  # tool name -> AssetOpsBench server
         for server, allow in (("iot", IOT_TOOLS), ("wo", WO_TOOLS)):
             for t in self.bridge.list_tools(server):
@@ -154,32 +157,44 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         v = VARIANTS[variant]
         if seed is not None:
             v = replace(v, seed=seed)  # also keys the reference_costs cache
-        self.sim = Sim(v)
-        self._result = None
-        self.couch.recreate()
-        self.couch.bulk("asset", [_asset_doc()])
-        self.couch.bulk("fc", [{"_id": f"fc:{c.code}", "code": c.code, "description": c.description,
-                                "dataset": "failure_code"} for c in FAILURE_CODES.values()])
-        self._write_rows(self.sim.history)
-        reference_costs(v)  # warm the score's reference runs now, not at the last step
-        self._state = GymState(episode_id=episode_id or str(uuid.uuid4()), step_count=0,
-                               variant=v.id, sim_time=iso(self.sim.now))
+        episode_id = episode_id or str(uuid.uuid4())
+        boot = self.prof.total("env.boot")
+        self.prof.reset(episode_id)
+        self.prof.meta.update(variant=v.id, boot_s=round(boot, 3))
+        with self.prof.span("env.reset", variant=v.id):
+            with self.prof.span("sim.history"):
+                self.sim = Sim(v)
+            self._result = None
+            with self.prof.span("couch.recreate"):
+                self.couch.recreate()
+                self.couch.bulk("asset", [_asset_doc()])
+                self.couch.bulk("fc", [{"_id": f"fc:{c.code}", "code": c.code, "description": c.description,
+                                        "dataset": "failure_code"} for c in FAILURE_CODES.values()])
+            with self.prof.span("couch.write_rows", rows=len(self.sim.history)):
+                self._write_rows(self.sim.history)
+            with self.prof.span("sim.reference_runs"):
+                reference_costs(v)  # warm the score's reference runs now, not at the last step
+        self._state = GymState(episode_id=episode_id, step_count=0, variant=v.id, sim_time=iso(self.sim.now))
         text = INSTRUCTION.format(site=SITE, asset=ASSET, now=iso(self.sim.now), end=iso(v.end),
                                   days=v.horizon_days, max_h=MAX_ADVANCE_H,
                                   history_start=iso(v.start - timedelta(days=v.history_days)))
         return Observation(done=False, reward=0.0, metadata={
-            "instruction": text, "site": SITE, "asset": ASSET,
+            "instruction": text, "site": SITE, "asset": ASSET, "episode_id": episode_id,
             "sim_time": iso(self.sim.now), "shift_end": iso(v.end)})
 
     # Rewards and termination only flow through step(), OpenEnv's simulation path;
     # direct /mcp calls reach the same tools without them.
     def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
         self._state.step_count += 1
-        return self._finalize(super().step(action, timeout_s=timeout_s, **kwargs))
+        with self.prof.span("env.step", tool=getattr(action, "tool_name", type(action).__name__)):
+            obs = super().step(action, timeout_s=timeout_s, **kwargs)
+        return self._finalize(obs)
 
     async def step_async(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
         self._state.step_count += 1
-        return self._finalize(await super().step_async(action, timeout_s=timeout_s, **kwargs))
+        with self.prof.span("env.step", tool=getattr(action, "tool_name", type(action).__name__)):
+            obs = await super().step_async(action, timeout_s=timeout_s, **kwargs)
+        return self._finalize(obs)
 
     def _step_impl(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
         return Observation(done=False, reward=0.0, metadata={
@@ -212,13 +227,20 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return {"error": "hours must be a number"}
         if not 0.25 <= hours <= MAX_ADVANCE_H:
             return {"error": f"hours must be between 0.25 and {MAX_ADVANCE_H}"}
-        self._sync_work_orders()
-        seen = len(self.sim.alerts)
-        rows = self.sim.advance(hours)
-        self._write_rows(rows)
-        updates = self._flush_changes()
+        with self.prof.span("tool.advance_time", hours=hours):
+            with self.prof.span("couch.sync_wo"):
+                self._sync_work_orders()
+            seen, before = len(self.sim.alerts), self.sim.now
+            with self.prof.span("sim.advance") as sp:
+                rows = self.sim.advance(hours)
+                sp.set(sim_hours=(self.sim.now - before).total_seconds() / 3600, rows=len(rows))
+            with self.prof.span("couch.write_rows", rows=len(rows)):
+                self._write_rows(rows)
+            with self.prof.span("couch.flush_wo"):
+                updates = self._flush_changes()
         alerts = [a.public() for a in self.sim.alerts[seen:]]
         out = {"sim_time": iso(self.sim.now), "shift_end": iso(self.sim.v.end),
+               "sim_hours_advanced": (self.sim.now - before).total_seconds() / 3600,
                "new_telemetry_rows": len(rows), "new_alert_count": len(alerts), "new_alerts": alerts[-30:],
                "work_order_updates": updates, "shift_over": self.sim.done}
         self._state.sim_time = iso(self.sim.now)
@@ -238,7 +260,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         if self.sim is None:
             return {"error": "call reset first"}
         if self._result is None:
-            self._end("agent finished")
+            with self.prof.span("tool.finish"):
+                self._end("agent finished")
         return {"message": "Shift ended; the remaining time was simulated.", "score": self._result["score"]}
 
     # ---- plumbing ---------------------------------------------------------
@@ -249,7 +272,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     def _call_proxied(self, name: str, arguments: dict) -> Any:
         if self.sim is None or self._result is not None:
             raise RuntimeError("no running episode; call reset")
-        with self._lock:
+        with self._lock, self.prof.span("mcp.aob", server=self.proxied[name], tool=name):
             data = self.bridge.call(self.proxied[name], name, arguments)
             if name == "update_workorder" and arguments.get("notes") is not None:
                 self._keep_tech_log(arguments, data)
@@ -335,13 +358,18 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                                  "timestamp": r["timestamp"], **r["values"]} for r in rows])
 
     def _end(self, reason: str) -> None:
-        self._sync_work_orders()
-        self.sim.run_to_end()  # ponytail: rows after an early finish are not written; nobody can read them
-        self.sim.changes.clear()
-        r = self.sim.result()
-        reactive, best = reference_costs(self.sim.v)
-        r.update(score=score(self.sim.v, r["cost_total"]), end_reason=reason,
-                 reference_costs={"reactive_practice": reactive, "oracle": best})
+        with self.prof.span("env.end", reason=reason):
+            with self.prof.span("couch.sync_wo"):
+                self._sync_work_orders()
+            before = self.sim.now
+            with self.prof.span("sim.run_to_end") as sp:
+                self.sim.run_to_end()  # ponytail: rows after an early finish are not written; nobody can read them
+                sp.set(sim_hours=(self.sim.now - before).total_seconds() / 3600)
+            self.sim.changes.clear()
+            r = self.sim.result()
+            reactive, best = reference_costs(self.sim.v)
+            r.update(score=score(self.sim.v, r["cost_total"]), end_reason=reason,
+                     reference_costs={"reactive_practice": reactive, "oracle": best})
         self._result = r
         self._state.finished, self._state.score = True, r["score"]
         self._state.sim_time = iso(self.sim.now)
@@ -350,6 +378,10 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         if self.sim is not None and self._result is None and self._state.step_count >= self.max_steps:
             self._end("step limit")
         if self._result is not None:
+            if "profile" not in self._result:  # first observation after the end: fold and emit once
+                self._result["profile"] = self.prof.emit(side="server", episode_id=self._state.episode_id,
+                                                         steps=self._state.step_count, score=self._result["score"],
+                                                         end_reason=self._result["end_reason"])
             obs.done, obs.reward = True, self._result["score"]
             obs.metadata = {**obs.metadata, "result": self._result}
         return obs
