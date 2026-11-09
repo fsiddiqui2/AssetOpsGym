@@ -88,3 +88,17 @@ def test_alert_tools(env):
     assert alert["rule"] not in {a["rule"] for a in out["new_alerts"]}
     bad, _ = call(env, "shelve_alert", rule="chiller_trip", hours=1)
     assert bad["error_code"] == "UNKNOWN_RULE", bad
+
+
+def test_step_limit_ends_the_episode(env):
+    env.reset(variant="healthy")
+    limit, env.max_steps = env.max_steps, 2
+    try:
+        _, first = call(env, "current_time")
+        _, second = call(env, "current_time")
+    finally:
+        env.max_steps = limit
+    assert not first.done and second.done
+    r = second.metadata["result"]
+    assert r["end_reason"] == "step limit", r
+    assert env.state.step_count == 2

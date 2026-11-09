@@ -195,6 +195,10 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     # ---- OpenEnv API ------------------------------------------------------
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None,
               variant: Optional[str] = None, **kwargs: Any) -> Observation:
+        return self._locked(self._reset, seed, episode_id, variant)
+
+    def _reset(self, seed: Optional[int], episode_id: Optional[str],
+               variant: Optional[str]) -> Observation:
         v = pick_variant(variant, seed)
         episode_id = episode_id or str(uuid.uuid4())
         boot = self.prof.total("env.boot")
@@ -229,13 +233,11 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     # Rewards and termination only flow through step(), OpenEnv's simulation path;
     # direct /mcp calls reach the same tools without them.
     def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
-        self._state.step_count += 1
         with self.prof.span("env.step", tool=getattr(action, "tool_name", type(action).__name__)):
             obs = super().step(action, timeout_s=timeout_s, **kwargs)
         return self._finalize(obs)
 
     async def step_async(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
-        self._state.step_count += 1
         with self.prof.span("env.step", tool=getattr(action, "tool_name", type(action).__name__)):
             obs = await super().step_async(action, timeout_s=timeout_s, **kwargs)
         return self._finalize(obs)
@@ -479,19 +481,21 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     def _finalize(self, obs: Observation) -> Observation:
         # _end expects the lock held (it runs inside locked tools)
         with self._lock:
+            self._state.step_count += 1
             if (self.sim is not None and self._result is None
                     and self._state.step_count >= self.max_steps):
                 self._end("step limit")
-        r = self._result
-        if r is not None:
-            if self._profile is None:  # first observation after the end
+            r = self._result
+            if r is not None and self._profile is None:
                 self._profile = self.prof.emit(
                     side="server", episode_id=self._state.episode_id,
                     steps=self._state.step_count, score=r.score,
                     end_reason=r.end_reason)
+            profile = self._profile
+        if r is not None:
             obs.done, obs.reward = True, r.score
             obs.metadata = {**obs.metadata, "result": {
-                **to_jsonable_python(r), "profile": self._profile}}
+                **to_jsonable_python(r), "profile": profile}}
         return obs
 
 
