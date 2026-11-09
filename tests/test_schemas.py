@@ -6,7 +6,8 @@ from datetime import timedelta
 import pytest
 
 from assetopsgym.schemas import (AlertEvent, CostEvent, EpisodeResult, Scenario, SimState,
-                                 Technician)
+                                 Technician, ErrorCode, ErrorResult,
+                                 GymError)
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
 from assetopsgym.server.faults import FAULT_MODES
 from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
@@ -56,6 +57,17 @@ def test_tool_check_is_loud():
     for bad in (MANIFEST.tools[1:], [*MANIFEST.tools, "x"]):
         with pytest.raises(RuntimeError):
             check_tools(list(bad), MANIFEST.tools)
+
+
+def test_gym_error_becomes_error_result():
+    from assetopsgym.server.environment import _errors_as_results
+
+    def bad(x: int) -> int:
+        raise GymError(ErrorCode.BAD_ARGUMENT, f"no {x}")
+
+    assert _errors_as_results(bad)(3) == ErrorResult(
+        error="no 3", error_code=ErrorCode.BAD_ARGUMENT)
+    assert _errors_as_results(abs)(-2) == 2
 
 
 def test_inject_fault_at_run_time():

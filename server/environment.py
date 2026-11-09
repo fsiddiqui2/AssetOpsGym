@@ -16,6 +16,7 @@ finish(); the final observation carries the score as its reward.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import secrets
 import threading
@@ -24,7 +25,7 @@ from dataclasses import replace
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, ParamSpec, TypeVar
 
 import yaml
 from fastmcp import FastMCP
@@ -32,11 +33,13 @@ from fastmcp.tools import Tool as FastMCPTool
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 from pydantic import Field
+from pydantic_core import to_jsonable_python
 from pydantic.json_schema import SkipJsonSchema
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.types import Action, Observation, State
 
 from ..profiling import Profiler
+from ..schemas import ErrorCode, ErrorResult, GymError
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
@@ -118,13 +121,29 @@ class _ForwardTool(FastMCPTool):
     forward: SkipJsonSchema[Any] = Field(exclude=True)
 
     async def run(self, arguments: dict[str, Any]) -> ToolResult:
-        data = await asyncio.to_thread(self.forward, self.name, arguments)
+        data = to_jsonable_python(await asyncio.to_thread(
+            self.forward, self.name, arguments))
         return ToolResult(content=[TextContent(type="text", text=json.dumps(data, default=str))],
                           structured_content={"result": data})
 
 
 _WRAPPED_OUTPUT = {"type": "object", "properties": {"result": {}}, "required": ["result"],
                    "x-fastmcp-wrap-result": True}
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _errors_as_results(
+        fn: Callable[P, R]) -> Callable[P, R | ErrorResult]:
+    @functools.wraps(fn)
+    def run(*args: P.args, **kwargs: P.kwargs) -> R | ErrorResult:
+        try:
+            return fn(*args, **kwargs)
+        except GymError as e:
+            return ErrorResult(error=e.message, error_code=e.code)
+    return run
 
 
 def _replace_dates(obj: Any, value: str) -> Any:
@@ -146,11 +165,11 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         # The clock tools run in a worker thread so CouchDB writes don't block the server's
         # event loop (other sessions keep stepping); the lock keeps this episode's simulator
         # single-threaded.
-        async def current_time() -> dict:
+        async def current_time() -> dict | ErrorResult:
             """Current simulated time and the end of your shift (ISO 8601, UTC)."""
             return await asyncio.to_thread(env._locked, env._clock)
 
-        async def advance_time(hours: float) -> dict:
+        async def advance_time(hours: float) -> dict | ErrorResult:
             """Let simulated time pass, between 0.25 and 168 hours. New telemetry lands in the IoT
             store and the maintenance organization works its queue. Returns the new time, the alerts
             raised meanwhile and any work-order updates."""
@@ -158,7 +177,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
 
         async def list_alerts(since: Optional[str] = None,
                         kind: Optional[str] = None, limit: int = 50,
-                        unacked_only: bool = False) -> dict:
+                        unacked_only: bool = False
+                        ) -> dict | ErrorResult:
             """Building-management alerts raised so far, oldest
             first. Shelved alerts are hidden.
 
@@ -172,18 +192,18 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 env._locked, env._alerts, since, kind, limit,
                 unacked_only)
 
-        async def acknowledge_alert(alert_id: str) -> dict:
+        async def acknowledge_alert(alert_id: str) -> dict | ErrorResult:
             """Mark an alert as seen, by its id (e.g. "AL17")."""
             return await asyncio.to_thread(env._locked, env._ack, alert_id)
 
-        async def shelve_alert(rule: str, hours: float) -> dict:
+        async def shelve_alert(rule: str, hours: float) -> dict | ErrorResult:
             """Hide new alerts of one rule (e.g.
             "low_condenser_water_flow") for 0.25-168 hours. The rule
             keeps evaluating; its alerts are recorded, not shown."""
             return await asyncio.to_thread(
                 env._locked, env._shelve, rule, hours)
 
-        async def finish() -> dict:
+        async def finish() -> dict | ErrorResult:
             """End your shift now. The rest of the horizon is simulated without you and the episode is scored."""
             return await asyncio.to_thread(env._locked, env._finish)
 
@@ -274,23 +294,27 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         super().close()
 
     # ---- tools ------------------------------------------------------------
-    def _clock(self) -> dict:
+    def _running_sim(self) -> Sim:
         if self.sim is None:
-            return {"error": "call reset first"}
+            raise GymError(ErrorCode.NO_EPISODE, "call reset first")
+        return self.sim
+
+    @_errors_as_results
+    def _clock(self) -> dict:
+        self._running_sim()
         left = (self.sim.v.end - self.sim.now).total_seconds() / 3600
         return {"sim_time": iso(self.sim.now), "shift_end": iso(self.sim.v.end), "hours_left": left}
 
-    def _advance(self, hours) -> dict:
-        if self.sim is None:
-            return {"error": "call reset first"}
+    @_errors_as_results
+    def _advance(self, hours: float) -> dict:
+        self._running_sim()
         if self._result is not None:
-            return {"error": "the episode is over"}
-        try:
-            hours = float(hours)
-        except (TypeError, ValueError):
-            return {"error": "hours must be a number"}
+            raise GymError(ErrorCode.EPISODE_OVER,
+                           "the episode is over")
         if not 0.25 <= hours <= MAX_ADVANCE_H:
-            return {"error": f"hours must be between 0.25 and {MAX_ADVANCE_H}"}
+            raise GymError(
+                ErrorCode.BAD_ARGUMENT,
+                f"hours must be between 0.25 and {MAX_ADVANCE_H}")
         with self.prof.span("tool.advance_time", hours=hours):
             with self.prof.span("couch.sync_wo"):
                 self._sync_work_orders()
@@ -312,37 +336,36 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             self._end("horizon reached")
         return out
 
+    @_errors_as_results
     def _alerts(self, since, kind, limit, unacked_only) -> dict:
-        if self.sim is None:
-            return {"error": "call reset first"}
-        items = [a.public() for a in self.sim.visible_alerts()
+        items = [a.public() for a in self._running_sim().visible_alerts()
                  if (kind is None or a.kind == kind)
                  and (since is None or iso(a.time) >= since)
                  and not (unacked_only and a.acked_at)]
         limit = max(1, min(200, int(limit)))
         return {"total": len(items), "returned": min(limit, len(items)), "alerts": items[-limit:]}
 
+    @_errors_as_results
     def _ack(self, alert_id: str) -> dict:
-        if self.sim is None:
-            return {"error": "call reset first"}
         try:
-            a = self.sim.acknowledge(str(alert_id))
+            a = self._running_sim().acknowledge(alert_id)
         except KeyError as e:
-            return {"error": str(e)}
+            raise GymError(ErrorCode.NOT_FOUND, e.args[0]) from e
         return {"id": a.id, "acked_at": iso(a.acked_at)}
 
+    @_errors_as_results
     def _shelve(self, rule: str, hours: float) -> dict:
-        if self.sim is None:
-            return {"error": "call reset first"}
         try:
-            until = self.sim.shelve(str(rule), float(hours))
-        except (KeyError, ValueError, TypeError) as e:
-            return {"error": str(e)}
+            until = self._running_sim().shelve(rule, hours)
+        except KeyError as e:
+            raise GymError(ErrorCode.UNKNOWN_RULE, e.args[0]) from e
+        except ValueError as e:
+            raise GymError(ErrorCode.BAD_ARGUMENT, str(e)) from e
         return {"rule": rule, "shelved_until": iso(until)}
 
+    @_errors_as_results
     def _finish(self) -> dict:
-        if self.sim is None:
-            return {"error": "call reset first"}
+        self._running_sim()
         if self._result is None:
             with self.prof.span("tool.finish"):
                 self._end("agent finished")
@@ -353,9 +376,12 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         with self._lock:
             return fn(*args)
 
+    @_errors_as_results
     def _call_proxied(self, name: str, arguments: dict) -> Any:
-        if self.sim is None or self._result is not None:
-            raise RuntimeError("no running episode; call reset")
+        self._running_sim()
+        if self._result is not None:
+            raise GymError(ErrorCode.EPISODE_OVER,
+                           "the episode is over; call reset")
         with self._lock, self.prof.span("mcp.aob", server=self.proxied[name], tool=name):
             data = self.bridge.call(self.proxied[name], name, arguments)
             if name == "update_workorder" and arguments.get("notes") is not None:

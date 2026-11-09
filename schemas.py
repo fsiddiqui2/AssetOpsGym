@@ -12,7 +12,9 @@ dataclasses internally; these are the contracts T2, T4, T7 and T8 write to.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Annotated, Literal, Optional, Protocol, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -294,6 +296,33 @@ class EpisodeResult(BaseModel):
 # ----------------------------------------------------------------------------
 # 4. Agent tool results (the tool list is openenv.yaml)
 # ----------------------------------------------------------------------------
+
+
+class ErrorCode(str, Enum):
+    NO_EPISODE = "NO_EPISODE"
+    EPISODE_OVER = "EPISODE_OVER"
+    BAD_ARGUMENT = "BAD_ARGUMENT"
+    NOT_FOUND = "NOT_FOUND"
+    UNKNOWN_RULE = "UNKNOWN_RULE"
+
+
+class GymError(Exception):
+    """A tool call the agent got wrong. The only exception
+    subclass: kinds are ErrorCode values, not subclasses."""
+
+    def __init__(self, code: ErrorCode, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorResult:
+    """AssetOpsBench's tool error shape, {"error": msg}, plus
+    the code its envelope has but drops before replying."""
+
+    error: str
+    error_code: ErrorCode
 
 
 class ClockResult(BaseModel):

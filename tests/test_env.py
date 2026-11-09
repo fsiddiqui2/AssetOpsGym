@@ -51,6 +51,11 @@ def test_do_nothing_scores_zero(env):
         if obs.done:
             break
     assert obs.reward == 0.0 and obs.metadata["result"]["failed"]
+    for name, args in (("advance_time", {"hours": 1}),
+                       ("history", {"site_name": "MAIN",
+                                    "asset_id": "Chiller 6"})):
+        over, _ = call(env, name, **args)
+        assert over["error_code"] == "EPISODE_OVER", over
 
 
 def test_oracle_through_the_wo_server_scores_one(env):
@@ -82,4 +87,4 @@ def test_alert_tools(env):
     out, _ = call(env, "advance_time", hours=168)
     assert alert["rule"] not in {a["rule"] for a in out["new_alerts"]}
     bad, _ = call(env, "shelve_alert", rule="chiller_trip", hours=1)
-    assert "error" in bad
+    assert bad["error_code"] == "UNKNOWN_RULE", bad
