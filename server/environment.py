@@ -19,6 +19,7 @@ import json
 import random
 import threading
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -151,6 +152,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             ids = sorted(VARIANTS)
             variant = ids[seed % len(ids)] if seed is not None else random.choice(ids)
         v = VARIANTS[variant]
+        if seed is not None:
+            v = replace(v, seed=seed)  # also keys the reference_costs cache
         self.sim = Sim(v)
         self._result = None
         self.couch.recreate()
