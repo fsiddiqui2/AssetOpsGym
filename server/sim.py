@@ -35,8 +35,6 @@ class Sim:
     wos = property(lambda s: s.maint.wos)
     changes = property(lambda s: s.maint.changes)
     events = property(lambda s: s.book.events)
-    ledger = property(lambda s: s.book.cost)
-    hours = property(lambda s: s.book.hours)
     ever_failed = property(lambda s: s.fault.ever_failed)
     failed_at = property(lambda s: s.fault.failed_at)
     done = property(lambda s: s.now >= s.v.end)

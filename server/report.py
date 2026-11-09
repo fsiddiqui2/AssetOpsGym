@@ -7,7 +7,7 @@ from datetime import datetime
 from ..schemas import EpisodeResult, KPIs, SimState, WorkOrderState
 from .alerts import Alert
 from .faults import Fault, severity
-from .ledger import Ledger
+from .ledger import Ledger, costs, downtime_hours
 from .maintenance import Maintenance, repairing
 from .variant import Variant
 
@@ -36,7 +36,8 @@ def kpis(l: Ledger, f: Fault, m: Maintenance,
     """The proposal's five KPIs, folded over the ledger."""
     dispatched = [w for w in m.wos.values() if w.dispatched]
     return KPIs(
-        downtime_hours=round(sum(l.hours.values()), 2),
+        downtime_hours=round(
+            sum(downtime_hours(l.events).values()), 2),
         missed_failures=int(f.ever_failed),
         false_dispatches=sum(f.mode is None or w.code != f.mode
                              for w in dispatched),
@@ -53,15 +54,16 @@ def result(v: Variant, l: Ledger, f: Fault, m: Maintenance,
                   if not w.emergency and w.code == mode
                   and onset is not None and w.created >= onset
                   and w.status != "CAN"]
+    cost = costs(l.events)
     delay = min(((w.created - onset).total_seconds() / 3600
                  for w in agent_hits), default=None)
     return EpisodeResult(
         variant=v.id, mode=mode, onset=onset,
         failed=f.ever_failed, failed_at=f.failed_at,
         failure_prevented=bool(mode) and not f.ever_failed,
-        cost_total=round(sum(l.cost.values()), 2),
-        cost_breakdown={k: round(x, 2) for k, x in l.cost.items()},
-        downtime_hours=dict(l.hours),
+        cost_total=round(sum(cost.values()), 2),
+        cost_breakdown={k: round(x, 2) for k, x in cost.items()},
+        downtime_hours=downtime_hours(l.events),
         dispatches=len(dispatched), false_dispatches=len(false),
         work_orders=len(m.wos),
         detection_delay_hours=(None if delay is None

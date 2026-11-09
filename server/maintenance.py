@@ -197,7 +197,6 @@ def _service(m: Maintenance, l: Ledger, f: Fault, v: Variant,
             wo.status, wo.dispatched = "INPRG", True
             wo.sla_breach = (wo.target_arrive is not None
                              and t > wo.target_arrive)
-            l.cost["dispatch"] += DISPATCH_COST
             l.events.append(CostEvent(time=t, kind="dispatch",
                                       amount=DISPATCH_COST,
                                       wonum=wo.wonum))
@@ -238,7 +237,6 @@ def _complete(m: Maintenance, l: Ledger, f: Fault, wo: WorkOrder,
         return
     mult = EMERGENCY_MULTIPLIER if wo.failed_at_start else 1.0
     cost = fc.repair_cost * mult
-    l.cost["repair"] += cost
     l.events.append(CostEvent(time=t, kind="repair", amount=cost,
                               wonum=wo.wonum))
     fixed = wo.code == f.mode and severity(f, t) > 0
