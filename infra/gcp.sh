@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One L4 VM serving vLLM, in your current gcloud project.
 #   infra/gcp.sh up spot|ondemand  create it (~10 min first boot)
-#   infra/gcp.sh tunnel            vLLM API on localhost:8000
+#   infra/gcp.sh tunnel            vLLM API on localhost:8001
 #   infra/gcp.sh ssh [--command CMD] | stop | start | down
 # No external IP (Columbia's org policy forbids them): SSH via
 # IAP, internet via Cloud NAT. Powers off after 60 idle min.
@@ -35,11 +35,17 @@ up() {
     *) echo "usage: up spot|ondemand"; exit 1 ;;
   esac
   gcloud services enable compute.googleapis.com
-  gcloud compute firewall-rules describe aog-iap \
-    >/dev/null 2>&1 ||
+  local fw="--allow=tcp:22,tcp:8001
+            --source-ranges=35.235.240.0/20"
+  # update, not skip: an old rule may still open :8000
+  # shellcheck disable=SC2086
+  if gcloud compute firewall-rules describe aog-iap \
+      >/dev/null 2>&1; then
+    gcloud compute firewall-rules update aog-iap $fw
+  else
     gcloud compute firewall-rules create aog-iap \
-      --network=default --allow=tcp:22,tcp:8000 \
-      --source-ranges=35.235.240.0/20
+      --network=default $fw
+  fi
   for z in $ZONES; do
     nat "${z%-*}"
     # shellcheck disable=SC2086
@@ -73,8 +79,8 @@ case ${1:-} in
   up) up "${2:-}" ;;
   ssh) shift; gcloud compute ssh $VM --zone="$(zone)" \
          --tunnel-through-iap "$@" ;;
-  tunnel) gcloud compute start-iap-tunnel $VM 8000 \
-            --local-host-port=localhost:8000 --zone="$(zone)" ;;
+  tunnel) gcloud compute start-iap-tunnel $VM 8001 \
+            --local-host-port=localhost:8001 --zone="$(zone)" ;;
   stop|start) gcloud compute instances "$1" $VM \
                 --zone="$(zone)" ;;
   down) down ;;

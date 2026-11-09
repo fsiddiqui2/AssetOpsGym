@@ -62,6 +62,7 @@ uv run pytest -q                               # anchors + end-to-end through th
 uv run server                                  # OpenEnv server on :8000 (PORT to change)
 OPENAI_BASE_URL=https://api.tokenrouter.com/v1 OPENAI_API_KEY=... \
   uv run python -m assetopsgym.agent --variant refleak_mid
+infra/serve.sh                                 # vLLM on :8001 (GPU box); agent: OPENAI_BASE_URL=http://localhost:8001/v1
 uv run openenv validate . --level static       # manifest check
 ```
 

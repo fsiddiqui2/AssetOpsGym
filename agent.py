@@ -4,7 +4,8 @@
     OPENAI_BASE_URL=https://api.tokenrouter.com/v1 OPENAI_API_KEY=... \\
       uv run python -m assetopsgym.agent --variant refleak_mid --model openai/gpt-5-mini
 
-Point OPENAI_BASE_URL at a vLLM server to run a local model. Every tool call goes
+Point OPENAI_BASE_URL at a vLLM server (infra/serve.sh:
+http://localhost:8001/v1) to run a local model. Every tool call goes
 through env.step(), so the final observation carries the reward. Prints a JSON
 summary with the score, the agent-side profile (LLM vs environment wall time,
 tokens per simulated hour) and the server-side profile the environment attaches

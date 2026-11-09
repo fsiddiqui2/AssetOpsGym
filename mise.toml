@@ -30,7 +30,7 @@ run = "uv run python -m assetopsgym.baselines"
 run = "uv run openenv validate . --level static"
 
 [tasks.vllm]
-description = "vLLM on :8000, on a GPU box (GCP VM or Insomnia node)"
+description = "vLLM on :8001, on a GPU box (GCP VM or Insomnia node)"
 run = "infra/serve.sh"
 
 [tasks.gcp]
