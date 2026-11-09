@@ -65,7 +65,7 @@ def test_result_state_and_events_validate(vid):
 
 
 def test_tool_check_is_loud():
-    from assetopsgym.server.environment import MANIFEST, check_tools
+    from assetopsgym.server.tools import MANIFEST, check_tools
 
     assert MANIFEST.name == "assetopsgym" and "finish" in MANIFEST.tools
     check_tools(list(reversed(MANIFEST.tools)), MANIFEST.tools)
@@ -75,7 +75,7 @@ def test_tool_check_is_loud():
 
 
 def test_gym_error_becomes_error_result():
-    from assetopsgym.server.environment import _errors_as_results
+    from assetopsgym.server.tools import _errors_as_results
 
     def bad(x: int) -> int:
         raise GymError(ErrorCode.BAD_ARGUMENT, f"no {x}")

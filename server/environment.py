@@ -16,19 +16,15 @@ finish(); the final observation carries the score as its reward.
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
 import secrets
 import threading
 import uuid
 from dataclasses import replace
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Callable, Optional, ParamSpec, TypeVar
+from typing import Any, Optional
 
-import yaml
 from fastmcp import FastMCP
 from fastmcp.tools import Tool as FastMCPTool
 from fastmcp.tools.tool import ToolResult
@@ -49,49 +45,14 @@ from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
 from .faults import FAILURE_CODES
+from .prompt import INSTRUCTION
 from .sim import Sim
 from .telemetry import ASSET, INSTALLED_SENSORS, SITE
+from .tools import MANIFEST, _errors_as_results, check_tools
 from .variant import Variant, iso
 
 MAX_ADVANCE_H = 168
 logger = logging.getLogger(__name__)
-
-INSTRUCTION = """You are the reliability engineer on call for site {site}. {asset} (chilled-water plant) streams its sensors every 15 minutes into the IoT store; history starts {history_start}.
-
-It is now {now}. Your shift covers the next {days} days, until {end}. Simulated time is frozen between your actions and moves only when you call advance_time(hours), at most {max_h} hours per call. Reading data is free.
-
-The building management system raises alerts, listed by list_alerts and summarized by advance_time. Operator alarms fire once a rule's condition has held for 2-3 hours; analytics alerts fire instantly and can be noisy.
-
-acknowledge_alert marks an alert as seen; shelve_alert hides a rule's new alerts for up to {max_shelve} hours, and shelved alerts are never shown to you.
-
-If you believe a fault is developing, open a corrective work order for asset {asset} at site {site} with generate_work_order and set its failure code with update_workorder (get_failure_codes lists them). The maintenance planner approves work orders and dispatches a technician; follow progress with get_workorder. The technician performs the work named by the failure code. Every technician visit costs money, and an unplanned chiller trip costs far more than planned work.
-
-When you are done, call finish; the rest of the {days} days is then simulated without you."""
-
-
-@dataclass(frozen=True, slots=True)
-class Manifest:
-    name: str
-    tools: tuple[str, ...]  # declared_tools: what the agent sees
-
-
-def load_manifest(path: Path) -> Manifest:
-    m = yaml.safe_load(path.read_text())
-    tools = m["validation"]["capabilities"]["declared_tools"]
-    return Manifest(name=m["name"], tools=tuple(tools))
-
-
-MANIFEST = load_manifest(
-    Path(__file__).resolve().parents[1] / "openenv.yaml")
-
-
-def check_tools(registered: list[str],
-                declared: tuple[str, ...]) -> None:
-    if sorted(registered) != sorted(declared):
-        raise RuntimeError(
-            "registered tools != openenv.yaml declared_tools; "
-            f"missing {sorted(set(declared) - set(registered))}, "
-            f"undeclared {sorted(set(registered) - set(declared))}")
 
 
 class GymState(State):
@@ -136,20 +97,6 @@ class _ForwardTool(FastMCPTool):
 _WRAPPED_OUTPUT = {"type": "object", "properties": {"result": {}}, "required": ["result"],
                    "x-fastmcp-wrap-result": True}
 
-
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def _errors_as_results(
-        fn: Callable[P, R]) -> Callable[P, R | ErrorResult]:
-    @functools.wraps(fn)
-    def run(*args: P.args, **kwargs: P.kwargs) -> R | ErrorResult:
-        try:
-            return fn(*args, **kwargs)
-        except GymError as e:
-            return ErrorResult(error=e.message, error_code=e.code)
-    return run
 
 
 def _replace_dates(obj: Any, value: str) -> Any:
