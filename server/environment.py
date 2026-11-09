@@ -40,14 +40,14 @@ from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
                        ClockResult, EpisodeResult, ErrorCode,
                        ErrorResult, FinishResult, GymError,
                        ListAlertsResult, ServiceRequestEvent,
-                       ShelveResult, TelemetryRow, WorkOrderUpdate)
+                       ShelveResult, WorkOrderUpdate)
+from . import mirror
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
-from .faults import FAILURE_CODES
 from .prompt import INSTRUCTION
 from .sim import Sim
-from .telemetry import ASSET, INSTALLED_SENSORS, SITE
+from .telemetry import ASSET, SITE
 from .tools import MANIFEST, _errors_as_results, check_tools
 from .variant import Variant, iso
 
@@ -211,11 +211,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             self._wo_seen = 0  # events already mirrored to CouchDB
             with self.prof.span("couch.recreate"):
                 self.couch.recreate()
-                self.couch.bulk("asset", [_asset_doc()])
-                self.couch.bulk("fc", [{"_id": f"fc:{c.code}", "code": c.code, "description": c.description,
-                                        "dataset": "failure_code"} for c in FAILURE_CODES.values()])
+                mirror.seed(self.couch)
             with self.prof.span("couch.write_rows", rows=len(self.sim.history)):
-                self._write_rows(self.sim.history)
+                mirror.write_rows(self.couch, self.sim.history)
             with self.prof.span("sim.reference_runs"):
                 reference_costs(v)  # warm the score's reference runs now, not at the last step
         self._state = GymState(
@@ -286,7 +284,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 rows = self.sim.advance(hours)
                 sp.set(sim_hours=(self.sim.now - before).total_seconds() / 3600, rows=len(rows))
             with self.prof.span("couch.write_rows", rows=len(rows)):
-                self._write_rows(rows)
+                mirror.write_rows(self.couch, rows)
             with self.prof.span("couch.flush_wo"):
                 updates = self._flush_changes()
         alerts = [a.public() for a in self.sim.alerts[seen:] if not a.shelved]
@@ -454,11 +452,6 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 f"{old}\n" if old else "") + _wo_log(e)
         return doc
 
-    def _write_rows(self, rows: list[TelemetryRow]) -> None:
-        self.couch.bulk("iot", [
-            {"_id": f"iot:{ASSET}:{iso(r.timestamp)}", "asset_id": ASSET,
-             "timestamp": iso(r.timestamp), **r.values} for r in rows])
-
     def _end(self, reason: str) -> None:
         with self.prof.span("env.end", reason=reason):
             with self.prof.span("couch.sync_wo"):
@@ -501,9 +494,3 @@ class AssetOpsGymEnvironment(MCPEnvironment):
 
 def _wo_log(e: ServiceRequestEvent) -> str:
     return f"[{iso(e.time)}] {e.note}"
-
-
-def _asset_doc() -> dict:
-    return {"_id": f"asset:{ASSET}", "assetnum": ASSET, "description": f"{ASSET} (chilled-water plant)",
-            "siteid": SITE, "orgid": "RIVPLANT", "status": "OPERATING", "assettype": "CHILLER",
-            "location": "MAIN-MECH-CH6", "sensors": INSTALLED_SENSORS, "dataset": "asset"}
