@@ -1,4 +1,5 @@
-"""The four interfaces the team meets at, as pydantic models.
+"""The four interfaces the team meets at: pydantic models, and
+frozen dataclasses for the tool results (FastMCP schemas them).
 
 Drafted from what the MVP already does, so every model here round-trips an object
 the code produces today (see tests/test_schemas.py). The simulator keeps its
@@ -17,7 +18,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Literal, Optional, Protocol, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+WoStatus = Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
+AlertKind = Literal["operator_alarm", "analytics"]
 
 # ----------------------------------------------------------------------------
 # 1. Scenario format
@@ -141,7 +145,7 @@ class WorkOrderState(BaseModel):
     wonum: str
     code: Optional[str]
     priority: int
-    status: Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
+    status: WoStatus
     emergency: bool = False
     created: datetime
     tech: Optional[str] = None
@@ -214,7 +218,7 @@ class FailureEvent(_Event):
 
 class AlertEvent(_Event):
     type: Literal["alert"] = "alert"
-    kind: Literal["operator_alarm", "analytics"]
+    kind: AlertKind
     rule: str
     sensor: str
     value: float
@@ -239,7 +243,7 @@ class ServiceRequestEvent(_Event):
 
     type: Literal["service_request"] = "service_request"
     wonum: str
-    status: Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
+    status: WoStatus
     priority: int
     code: Optional[str] = None
     emergency: bool = False
@@ -279,7 +283,7 @@ class EpisodeResult(BaseModel):
     false_dispatches: int
     work_orders: int
     detection_delay_hours: Optional[float]
-    alerts: dict[Literal["operator_alarm", "analytics"], int]
+    alerts: dict[AlertKind, int]
     kpis: KPIs
     events: int = Field(description="ledger length; the events themselves are in Sim.events")
     score: Optional[float] = Field(None, ge=-1, le=1)
@@ -325,35 +329,53 @@ class ErrorResult:
     error_code: ErrorCode
 
 
-class ClockResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ClockResult:
     sim_time: datetime
     shift_end: datetime
     hours_left: float
 
 
-class AdvanceTimeResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class WorkOrderUpdate:
+    wonum: str
+    status: WoStatus
+    time: datetime
+    note: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class AdvanceTimeResult:
     sim_time: datetime
     shift_end: datetime
+    sim_hours_advanced: float
     new_telemetry_rows: int
     new_alert_count: int
-    new_alerts: list[AlertEvent]
-    work_order_updates: list[dict]
+    new_alerts: list[dict]  # sim.Alert.public(), newest 30
+    work_order_updates: list[WorkOrderUpdate]
     shift_over: bool
 
 
-class ListAlertsResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ListAlertsResult:
     total: int
     returned: int
-    alerts: list[AlertEvent]
-
-    @field_validator("alerts")
-    @classmethod
-    def _bounded(cls, v):
-        if len(v) > 200:
-            raise ValueError("limit is 200")
-        return v
+    alerts: list[dict]  # sim.Alert.public(), at most 200
 
 
-class FinishResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class AckResult:
+    id: str
+    acked_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ShelveResult:
+    rule: str
+    shelved_until: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FinishResult:
     message: str
-    score: float = Field(ge=-1, le=1)
+    score: float

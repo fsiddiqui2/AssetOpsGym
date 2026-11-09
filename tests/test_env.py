@@ -32,7 +32,7 @@ def call(env, name, **args):
 
     obs = env.step(CallToolAction(tool_name=name, arguments=args))
     assert obs.error is None, obs.error
-    return obs.result.data, obs
+    return obs.result.structured_content["result"], obs
 
 
 def test_only_the_past_is_stored(env):

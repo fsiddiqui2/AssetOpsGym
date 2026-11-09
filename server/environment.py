@@ -39,7 +39,10 @@ from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.types import Action, Observation, State
 
 from ..profiling import Profiler
-from ..schemas import ErrorCode, ErrorResult, GymError
+from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
+                       ClockResult, ErrorCode, ErrorResult,
+                       FinishResult, GymError, ListAlertsResult,
+                       ShelveResult, WorkOrderUpdate)
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
@@ -165,20 +168,22 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         # The clock tools run in a worker thread so CouchDB writes don't block the server's
         # event loop (other sessions keep stepping); the lock keeps this episode's simulator
         # single-threaded.
-        async def current_time() -> dict | ErrorResult:
+        async def current_time() -> ClockResult | ErrorResult:
             """Current simulated time and the end of your shift (ISO 8601, UTC)."""
             return await asyncio.to_thread(env._locked, env._clock)
 
-        async def advance_time(hours: float) -> dict | ErrorResult:
+        async def advance_time(
+                hours: float) -> AdvanceTimeResult | ErrorResult:
             """Let simulated time pass, between 0.25 and 168 hours. New telemetry lands in the IoT
             store and the maintenance organization works its queue. Returns the new time, the alerts
             raised meanwhile and any work-order updates."""
             return await asyncio.to_thread(env._locked, env._advance, hours)
 
-        async def list_alerts(since: Optional[str] = None,
-                        kind: Optional[str] = None, limit: int = 50,
-                        unacked_only: bool = False
-                        ) -> dict | ErrorResult:
+        async def list_alerts(
+                since: Optional[str] = None,
+                kind: Optional[AlertKind] = None,
+                limit: int = 50, unacked_only: bool = False
+                ) -> ListAlertsResult | ErrorResult:
             """Building-management alerts raised so far, oldest
             first. Shelved alerts are hidden.
 
@@ -192,18 +197,21 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 env._locked, env._alerts, since, kind, limit,
                 unacked_only)
 
-        async def acknowledge_alert(alert_id: str) -> dict | ErrorResult:
+        async def acknowledge_alert(
+                alert_id: str) -> AckResult | ErrorResult:
             """Mark an alert as seen, by its id (e.g. "AL17")."""
             return await asyncio.to_thread(env._locked, env._ack, alert_id)
 
-        async def shelve_alert(rule: str, hours: float) -> dict | ErrorResult:
+        async def shelve_alert(
+                rule: str,
+                hours: float) -> ShelveResult | ErrorResult:
             """Hide new alerts of one rule (e.g.
             "low_condenser_water_flow") for 0.25-168 hours. The rule
             keeps evaluating; its alerts are recorded, not shown."""
             return await asyncio.to_thread(
                 env._locked, env._shelve, rule, hours)
 
-        async def finish() -> dict | ErrorResult:
+        async def finish() -> FinishResult | ErrorResult:
             """End your shift now. The rest of the horizon is simulated without you and the episode is scored."""
             return await asyncio.to_thread(env._locked, env._finish)
 
@@ -300,13 +308,14 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         return self.sim
 
     @_errors_as_results
-    def _clock(self) -> dict:
-        self._running_sim()
-        left = (self.sim.v.end - self.sim.now).total_seconds() / 3600
-        return {"sim_time": iso(self.sim.now), "shift_end": iso(self.sim.v.end), "hours_left": left}
+    def _clock(self) -> ClockResult:
+        sim = self._running_sim()
+        left = (sim.v.end - sim.now).total_seconds() / 3600
+        return ClockResult(sim_time=sim.now, shift_end=sim.v.end,
+                           hours_left=left)
 
     @_errors_as_results
-    def _advance(self, hours: float) -> dict:
+    def _advance(self, hours: float) -> AdvanceTimeResult:
         self._running_sim()
         if self._result is not None:
             raise GymError(ErrorCode.EPISODE_OVER,
@@ -327,49 +336,57 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             with self.prof.span("couch.flush_wo"):
                 updates = self._flush_changes()
         alerts = [a.public() for a in self.sim.alerts[seen:] if not a.shelved]
-        out = {"sim_time": iso(self.sim.now), "shift_end": iso(self.sim.v.end),
-               "sim_hours_advanced": (self.sim.now - before).total_seconds() / 3600,
-               "new_telemetry_rows": len(rows), "new_alert_count": len(alerts), "new_alerts": alerts[-30:],
-               "work_order_updates": updates, "shift_over": self.sim.done}
+        out = AdvanceTimeResult(
+            sim_time=self.sim.now, shift_end=self.sim.v.end,
+            sim_hours_advanced=(self.sim.now - before)
+            .total_seconds() / 3600,
+            new_telemetry_rows=len(rows), new_alert_count=len(alerts),
+            new_alerts=alerts[-30:], work_order_updates=updates,
+            shift_over=self.sim.done)
         self._state.sim_time = iso(self.sim.now)
         if self.sim.done:
             self._end("horizon reached")
         return out
 
     @_errors_as_results
-    def _alerts(self, since, kind, limit, unacked_only) -> dict:
+    def _alerts(self, since: Optional[str], kind: Optional[AlertKind],
+                limit: int, unacked_only: bool) -> ListAlertsResult:
         items = [a.public() for a in self._running_sim().visible_alerts()
                  if (kind is None or a.kind == kind)
                  and (since is None or iso(a.time) >= since)
                  and not (unacked_only and a.acked_at)]
-        limit = max(1, min(200, int(limit)))
-        return {"total": len(items), "returned": min(limit, len(items)), "alerts": items[-limit:]}
+        limit = max(1, min(200, limit))
+        return ListAlertsResult(total=len(items),
+                                returned=min(limit, len(items)),
+                                alerts=items[-limit:])
 
     @_errors_as_results
-    def _ack(self, alert_id: str) -> dict:
+    def _ack(self, alert_id: str) -> AckResult:
         try:
             a = self._running_sim().acknowledge(alert_id)
         except KeyError as e:
             raise GymError(ErrorCode.NOT_FOUND, e.args[0]) from e
-        return {"id": a.id, "acked_at": iso(a.acked_at)}
+        return AckResult(id=a.id, acked_at=a.acked_at)
 
     @_errors_as_results
-    def _shelve(self, rule: str, hours: float) -> dict:
+    def _shelve(self, rule: str, hours: float) -> ShelveResult:
         try:
             until = self._running_sim().shelve(rule, hours)
         except KeyError as e:
             raise GymError(ErrorCode.UNKNOWN_RULE, e.args[0]) from e
         except ValueError as e:
             raise GymError(ErrorCode.BAD_ARGUMENT, str(e)) from e
-        return {"rule": rule, "shelved_until": iso(until)}
+        return ShelveResult(rule=rule, shelved_until=until)
 
     @_errors_as_results
-    def _finish(self) -> dict:
+    def _finish(self) -> FinishResult:
         self._running_sim()
         if self._result is None:
             with self.prof.span("tool.finish"):
                 self._end("agent finished")
-        return {"message": "Shift ended; the remaining time was simulated.", "score": self._result["score"]}
+        return FinishResult(
+            message="Shift ended; the remaining time was simulated.",
+            score=self._result["score"])
 
     # ---- plumbing ---------------------------------------------------------
     def _locked(self, fn, *args):
@@ -429,7 +446,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             elif not cancel and doc.get("assetnum") == ASSET:
                 self.sim.file_wo(doc.get("failurecode"), doc.get("wopriority", 3), wonum=wonum)
 
-    def _flush_changes(self) -> list[dict]:
+    def _flush_changes(self) -> list[WorkOrderUpdate]:
         """Write the maintenance organization's work-order updates back to CouchDB."""
         updates = []
         for c in self.sim.changes:
@@ -441,7 +458,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                        "reportdate": _wo_time(c["reportdate"]), "reportedby": c["reported_by"],
                        "failurecode": c["failurecode"]}
                 self.couch.put("wo", doc)
-                updates.append({"wonum": c["wonum"], "status": c["status"], "note": c["description"]})
+                updates.append(WorkOrderUpdate(
+                    wonum=c["wonum"], status=c["status"],
+                    time=c["reportdate"], note=c["description"]))
                 continue
             doc = self.couch.get("wo", doc_id)
             if doc is None:
@@ -459,7 +478,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 log = doc.get("description_longdescription") or ""
                 doc["description_longdescription"] = (log + "\n" if log else "") + f"[{iso(c['time'])}] {c['notes']}"
             self.couch.put("wo", doc)
-            updates.append({"wonum": c["wonum"], "status": c["status"], "time": iso(c["time"]), "note": c.get("notes")})
+            updates.append(WorkOrderUpdate(
+                wonum=c["wonum"], status=c["status"], time=c["time"],
+                note=c.get("notes")))
         self.sim.changes.clear()
         return updates
 
