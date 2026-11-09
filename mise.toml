@@ -1,0 +1,38 @@
+# `mise trust && mise install`, then `mise tasks` to list.
+# Extra args pass through: `mise run agent -- --variant refleak_mid`.
+[tools]
+python = "3.13"
+uv = "0.11.16"
+
+[tasks.setup]
+run = "uv sync --extra agent --extra dev --extra profile"
+
+[tasks.couch]
+description = "CouchDB for the AOB servers (docker)"
+run = "docker compose -f ${AOB_DIR:-../AssetOpsBench}/src/couchdb/docker-compose.yaml up -d"
+
+[tasks.test]
+run = "uv run pytest -q"
+
+[tasks.server]
+description = "OpenEnv server on :8000 (PORT to change)"
+run = "uv run server"
+
+[tasks.agent]
+description = "zero-shot agent; OPENAI_BASE_URL picks the model server"
+run = "uv run python -m assetopsgym.agent"
+
+[tasks.baselines]
+description = "admission-anchor table"
+run = "uv run python -m assetopsgym.baselines"
+
+[tasks.validate]
+run = "uv run openenv validate . --level static"
+
+[tasks.vllm]
+description = "vLLM on :8000, on a GPU box (GCP VM or Insomnia node)"
+run = "infra/serve.sh"
+
+[tasks.gcp]
+description = "GPU VM: up spot|ondemand, tunnel, ssh, stop, start, down"
+run = "infra/gcp.sh"

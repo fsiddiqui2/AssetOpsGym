@@ -17,7 +17,8 @@ servers and is scored over a 60-day window.
 
 Run: `uv run pytest -q` (the `test_env.py` tests need
 CouchDB and `../AssetOpsBench`, else they skip).
-Server: `uv run server`.
+Server: `uv run server`. The same commands are mise tasks
+(`mise.toml`, `mise tasks`).
 W&B: `WANDB_ENTITY=hpml-projects WANDB_PROJECT=assetopsgym`
 (host `api.forge.coreweave.com`, wandb ≥ 0.31's default).
 
