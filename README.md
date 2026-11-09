@@ -90,7 +90,7 @@ Rewards only flow through `step()`, which is OpenEnv's simulation path. `list_to
 
 Each line names its owner task on the team board.
 
-- **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise, and Dhaval's MATLAB failure-mode list replaces our three modes.
+- **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise (`analysis/chiller6.md`), and Dhaval's MATLAB failure-mode list replaces our three modes.
 - **Alerts live inside the gym** with fixed thresholds. The separate alert MCP server, with operator alarms vs analytics alerts, is T7.
 - **Cost priors are flat guesses**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
 - **Work-order edits** after the technician arrives are ignored. A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
