@@ -36,8 +36,11 @@ from openenv.core.env_server.types import Action, Observation, State
 from ..profiling import Profiler
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
-from .sim import (ASSET, FAILURE_CODES, INSTALLED_SENSORS, MAX_SHELVE_H,
-                  SITE, Sim, Variant, iso)
+from .alerts import MAX_SHELVE_H
+from .faults import FAILURE_CODES
+from .sim import Sim
+from .telemetry import ASSET, INSTALLED_SENSORS, SITE
+from .variant import Variant, iso
 
 IOT_TOOLS = ("sites", "asset_ids", "asset_detail", "assets", "installed_sensors", "measured_sensors",
              "stream_extent", "history", "latest_reading", "sensor_stats", "sensor_coverage")
