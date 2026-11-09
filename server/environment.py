@@ -49,7 +49,7 @@ INSTRUCTION = """You are the reliability engineer on call for site {site}. {asse
 
 It is now {now}. Your shift covers the next {days} days, until {end}. Simulated time is frozen between your actions and moves only when you call advance_time(hours), at most {max_h} hours per call. Reading data is free.
 
-The building management system raises alerts, listed by list_alerts and summarized by advance_time. Operator alarms have a 2-hour on-delay; analytics alerts fire instantly and can be noisy.
+The building management system raises alerts, listed by list_alerts and summarized by advance_time. Operator alarms fire once a rule's condition has held for 2-3 hours; analytics alerts fire instantly and can be noisy.
 
 acknowledge_alert marks an alert as seen; shelve_alert hides a rule's new alerts for up to {max_shelve} hours, and shelved alerts are never shown to you.
 
@@ -125,7 +125,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
 
             Args:
                 since: optional ISO 8601 lower bound on alert time.
-                kind: optional filter, "operator_alarm" (2-hour on-delay) or "analytics" (instant, noisy).
+                kind: optional filter, "operator_alarm" (condition held 2-3 h) or "analytics" (instant, noisy).
                 limit: maximum alerts returned, newest kept (1-200).
                 unacked_only: only alerts not yet acknowledged.
             """

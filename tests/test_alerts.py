@@ -7,8 +7,10 @@ import pytest
 
 from assetopsgym.schemas import AlertActionEvent
 from assetopsgym.server.scenarios import VARIANTS
-from assetopsgym.server.sim import (ANALYTICS_COOLDOWN, Z_WINDOW_TICKS,
-                                    Sim, ZWindow)
+from assetopsgym.server.sim import (ANALYTICS_COOLDOWN, DESIGN_FLOW_GPM,
+                                    EFFICIENCY, FLOW, LOADED, POWER, REFRIG,
+                                    SETPOINT, SUPPLY, TICK, TONNAGE,
+                                    Z_WINDOW_TICKS, Sim, ZWindow)
 
 
 def test_zwindow_flags_a_step_not_noise():
@@ -29,7 +31,7 @@ def test_analytics_respect_cooldown_and_are_deterministic():
             gap = x.time - last.get(x.rule, x.time - ANALYTICS_COOLDOWN)
             assert gap >= ANALYTICS_COOLDOWN
             last[x.rule] = x.time
-    assert len(last) == 5
+    assert len(last) == 6  # every running rule
 
 
 def test_shelve_hides_but_does_not_change_the_world():
@@ -72,3 +74,31 @@ def test_acknowledge_once():
     assert [(e.action, e.alert_id) for e in acks] == [("ack", a.id)]
     with pytest.raises(KeyError):
         sim.acknowledge("AL0")
+
+
+OK = {FLOW: DESIGN_FLOW_GPM, SUPPLY: 44.0, REFRIG: 40.0, SETPOINT: 44.0,
+      LOADED: 50.0, TONNAGE: 400.0, EFFICIENCY: 0.6, POWER: 4.0}
+
+
+def test_operator_alarm_once_per_run_of_hold_ticks():
+    ok = OK
+    sim = Sim(VARIANTS["healthy"])
+    low = {**ok, FLOW: 0.5 * DESIGN_FLOW_GPM}
+    t = sim.now
+    ticks = [low] * 10 + [ok] + [low] * 8 + [None] + [low] * 7
+    for v in ticks:  # None = not running
+        sim._evaluate_rules(t, v or ok, running=v is not None)
+        t += TICK
+    fired = [a for a in sim.alerts if a.kind == "operator_alarm"
+             and a.rule == "low_condenser_water_flow"]
+    assert len(fired) == 2
+
+
+def test_power_while_off_needs_three_hours_off():
+    sim = Sim(VARIANTS["healthy"])
+    t = sim.now
+    for running in [False] * 11 + [True] + [False] * 12:
+        sim._evaluate_rules(t, {**OK, POWER: 6.0}, running=running)
+        t += TICK
+    fired = [a for a in sim.alerts if a.rule == "power_while_off"]
+    assert len(fired) == 1 and fired[0].kind == "operator_alarm"

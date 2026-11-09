@@ -17,6 +17,7 @@ import random
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Callable
 
 from ..schemas import (AlertActionEvent, AlertEvent, CostEvent, DowntimeEvent,
                        FailureEvent, LedgerEvent, ServiceRequestEvent)
@@ -96,28 +97,50 @@ class Technician:
 
 DEFAULT_CREW = (Technician("TECH-01"), Technician("TECH-02"))
 
-# BMS rules: metric (higher is worse) and operator threshold (needs the
-# 2-hour on-delay). Analytics alerts fire when the metric is Z_ALERT sigma
-# above its own last 24 h. Evaluated while running.
-ON_DELAY_TICKS = 8
+# BMS rules. An operator alarm fires when metric > threshold has held for
+# hold_ticks in a row with the chiller in the rule's run state (once per
+# such run); an analytics alert when a running chiller's metric is
+# Z_ALERT sigma above its own last 24 h.
 ANALYTICS_COOLDOWN = timedelta(hours=6)
 Z_WINDOW_TICKS = 96
 Z_ALERT = 3.0
 MAX_SHELVE_H = 168
+
+
+@dataclass(frozen=True)
+class Rule:
+    name: str
+    sensor: str
+    metric: Callable[[dict], float]  # higher is worse
+    threshold: float
+    message: str
+    hold_ticks: int = 8  # 2 h
+    running: bool = True  # the run state the rule watches
+
+
 RULES = [
-    ("low_condenser_water_flow", FLOW,
-     lambda v: 1 - v[FLOW] / DESIGN_FLOW_GPM, 0.34,
-     "condenser water flow below design"),
-    ("high_evaporator_approach", REFRIG, lambda v: v[SUPPLY] - v[REFRIG], 11.0,
-     "evaporator approach (supply minus refrigerant temperature) high"),
-    ("compressor_load_mismatch", LOADED,
-     lambda v: v[LOADED] - 100 * v[TONNAGE] / CAPACITY_TONS, 19.0,
-     "compressor % loaded high for the tonnage delivered"),
-    ("supply_above_setpoint", SUPPLY, lambda v: v[SUPPLY] - v[SETPOINT], 3.0,
-     "chilled water supply above setpoint"),
-    ("high_kw_per_ton", EFFICIENCY,
-     lambda v: v[EFFICIENCY] if v[LOADED] > 50 else 0.0, 0.95,
-     "kW per ton high at load"),
+    Rule("low_condenser_water_flow", FLOW,
+         lambda v: 1 - v[FLOW] / DESIGN_FLOW_GPM, 0.34,
+         "condenser water flow below design"),
+    Rule("high_evaporator_approach", REFRIG,
+         lambda v: v[SUPPLY] - v[REFRIG], 11.0,
+         "evaporator approach (supply minus refrigerant temperature) high"),
+    Rule("compressor_load_mismatch", LOADED,
+         lambda v: v[LOADED] - 100 * v[TONNAGE] / CAPACITY_TONS, 19.0,
+         "compressor % loaded high for the tonnage delivered"),
+    Rule("supply_above_setpoint", SUPPLY,
+         lambda v: v[SUPPLY] - v[SETPOINT], 3.0,
+         "chilled water supply above setpoint"),
+    Rule("high_kw_per_ton", EFFICIENCY,
+         lambda v: v[EFFICIENCY] if v[LOADED] > 50 else 0.0, 0.95,
+         "kW per ton high at load"),
+    # the next two are from AssetOpsBench's chiller monitoring rules
+    Rule("supply_below_setpoint", SUPPLY,
+         lambda v: v[SETPOINT] - v[SUPPLY], 2.0,
+         "chilled water supply below setpoint"),
+    Rule("power_while_off", POWER, lambda v: v[POWER], 5.0,
+         "power input above 5 kW while the chiller is off",
+         hold_ticks=12, running=False),
 ]
 
 
@@ -192,9 +215,7 @@ class ZWindow:
 
 @dataclass
 class RuleState:
-    on: int = 0  # consecutive ticks above the operator threshold
-    off: int = 0
-    active: bool = False
+    run: int = 0  # consecutive running ticks above the threshold
     last_analytics: datetime | None = None
     window: ZWindow = field(default_factory=ZWindow)
 
@@ -237,7 +258,7 @@ class Sim:
         self._weather = 0.0
         self._excess_kw = 0.0
         self._blip: tuple[int, int] | None = None  # (kind, ticks left)
-        self.rules = {r[0]: RuleState() for r in RULES}
+        self.rules = {r.name: RuleState() for r in RULES}
         self.shelved_until: dict[str, datetime] = {}
         self.alerts: list[Alert] = []
         self.wos: dict[str, WorkOrder] = {}
@@ -414,7 +435,7 @@ class Sim:
             energy = self._excess_kw * TICK_H * ENERGY_PRICE_PER_KWH
             self.ledger["excess_energy"] += energy
             self._energy_acc += energy
-            self._evaluate_rules(t, values)
+        self._evaluate_rules(t, values, running)
         return {"timestamp": iso(t), "values": values}
 
     def _charge(self, kind: str, per_hour: float) -> None:
@@ -502,28 +523,32 @@ class Sim:
         v[SETPOINT] = SETPOINT_F
         return {k: (round(x, 3) if isinstance(x, float) else x) for k, x in v.items()}
 
-    def _evaluate_rules(self, t: datetime, v: dict) -> None:
-        for rule, sensor, metric, op_thr, msg in RULES:
-            m = metric(v)
-            st = self.rules[rule]
-            z = st.window.z(m)
-            st.window.push(m)
-            last = st.last_analytics
-            cool = last is None or t - last >= ANALYTICS_COOLDOWN
-            if z is not None and z > Z_ALERT and cool:
-                self._alert(t, "analytics", rule, sensor, m,
-                            f"Analytics: {msg}, {z:.1f} sigma"
-                            " above its 24 h mean")
-                st.last_analytics = t
-            if m > op_thr:
-                st.on, st.off = st.on + 1, 0
-            else:
-                st.on, st.off = 0, st.off + 1
-            if not st.active and st.on >= ON_DELAY_TICKS:
-                st.active = True
-                self._alert(t, "operator_alarm", rule, sensor, m, f"Operator alarm: {msg} for 2 hours")
-            elif st.active and st.off >= ON_DELAY_TICKS:
-                st.active = False
+    def _evaluate_rules(self, t: datetime, v: dict, running: bool) -> None:
+        for r in RULES:
+            st = self.rules[r.name]
+            if running != r.running:
+                st.run = 0
+                continue
+            m = r.metric(v)
+            if running:
+                self._analytics(t, r, st, m)
+            st.run = st.run + 1 if m > r.threshold else 0
+            if st.run == r.hold_ticks:
+                hours = r.hold_ticks * TICK_H
+                self._alert(t, "operator_alarm", r.name, r.sensor, m,
+                            f"Operator alarm: {r.message} for {hours:g} hours")
+
+    def _analytics(self, t: datetime, r: Rule, st: RuleState,
+                   m: float) -> None:
+        z = st.window.z(m)
+        st.window.push(m)
+        last = st.last_analytics
+        cool = last is None or t - last >= ANALYTICS_COOLDOWN
+        if z is not None and z > Z_ALERT and cool:
+            self._alert(t, "analytics", r.name, r.sensor, m,
+                        f"Analytics: {r.message}, {z:.1f} sigma"
+                        " above its 24 h mean")
+            st.last_analytics = t
 
     def _fail(self, t: datetime) -> None:
         self.failed, self.ever_failed, self.failed_at = True, True, t
