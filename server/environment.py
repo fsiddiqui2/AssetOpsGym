@@ -120,9 +120,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         # event loop (other sessions keep stepping); the lock keeps this episode's simulator
         # single-threaded.
         @mcp.tool
-        def current_time() -> dict:
+        async def current_time() -> dict:
             """Current simulated time and the end of your shift (ISO 8601, UTC)."""
-            return env._clock()
+            return await asyncio.to_thread(env._locked, env._clock)
 
         @mcp.tool
         async def advance_time(hours: float) -> dict:
@@ -132,7 +132,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return await asyncio.to_thread(env._locked, env._advance, hours)
 
         @mcp.tool
-        def list_alerts(since: Optional[str] = None,
+        async def list_alerts(since: Optional[str] = None,
                         kind: Optional[str] = None, limit: int = 50,
                         unacked_only: bool = False) -> dict:
             """Building-management alerts raised so far, oldest
@@ -144,7 +144,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 limit: maximum alerts returned, newest kept (1-200).
                 unacked_only: only alerts not yet acknowledged.
             """
-            return env._alerts(since, kind, limit, unacked_only)
+            return await asyncio.to_thread(
+                env._locked, env._alerts, since, kind, limit,
+                unacked_only)
 
         @mcp.tool
         async def acknowledge_alert(alert_id: str) -> dict:
@@ -431,8 +433,11 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         self._state.sim_time = iso(self.sim.now)
 
     def _finalize(self, obs: Observation) -> Observation:
-        if self.sim is not None and self._result is None and self._state.step_count >= self.max_steps:
-            self._end("step limit")
+        # _end expects the lock held (it runs inside locked tools)
+        with self._lock:
+            if (self.sim is not None and self._result is None
+                    and self._state.step_count >= self.max_steps):
+                self._end("step limit")
         if self._result is not None:
             if "profile" not in self._result:  # first observation after the end: fold and emit once
                 self._result["profile"] = self.prof.emit(side="server", episode_id=self._state.episode_id,
