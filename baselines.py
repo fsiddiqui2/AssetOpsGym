@@ -76,7 +76,8 @@ POLICIES = {"do_nothing": do_nothing, "oracle": oracle, "threshold_on_delay": th
 
 
 def table() -> dict[str, dict[str, float]]:
-    return {vid: {name: score(v, run(v, p)["cost_total"]) for name, p in POLICIES.items()}
+    return {vid: {name: score(v, run(v, p).cost_total)
+                  for name, p in POLICIES.items()}
             for vid, v in VARIANTS.items()}
 
 

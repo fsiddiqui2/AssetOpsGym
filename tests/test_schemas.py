@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from assetopsgym.schemas import (AlertEvent, CostEvent, EpisodeResult, SimState,
-                                 ErrorCode, ErrorResult, GymError)
+from assetopsgym.schemas import (AlertEvent, CostEvent, ErrorCode,
+                                 ErrorResult, GymError)
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
 from assetopsgym.server.faults import FAULT_MODES
 from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
@@ -41,13 +41,16 @@ def test_result_state_and_events_validate(vid):
     v = VARIANTS[vid]
     sim = Sim(v)
     sim.advance(24 * 30)
-    SimState.model_validate(sim.state())
+    st = sim.state()
+    assert st.sim_time == sim.now and 0 <= st.severity <= 1
     sim.file_wo("CH-CWFLOW", priority=2)
     sim.run_to_end()
-    r = EpisodeResult.model_validate(sim.result())
+    r = sim.result()
     assert r.events == len(sim.events)
-    for a in sim.alerts:
-        AlertEvent.model_validate(a.public())
+    raised = [e.id for e in sim.events if isinstance(e, AlertEvent)]
+    assert raised == [a.id for a in sim.alerts]
+    with pytest.raises(ValueError):
+        replace(r, cost_total=r.cost_total + 1)
     # Every dollar in the score has a cost event behind it, by kind.
     by_kind = {}
     for e in sim.events:
@@ -87,7 +90,7 @@ def test_inject_fault_at_run_time():
     sim.advance(24 * 10)
     sim.inject_fault("CH-REFLEAK", sim.now, pf_days=10)
     sim.run_to_end()
-    assert sim.ever_failed and sim.result()["mode"] == "CH-REFLEAK"
+    assert sim.ever_failed and sim.result().mode == "CH-REFLEAK"
     with pytest.raises(ValueError):
         sim.inject_fault("CH-NOPE", sim.now, 1)
 
@@ -112,6 +115,7 @@ def run_one(v):
 
 def test_default_crew_leaves_reference_scores_alone():
     for v in VARIANTS.values():
-        assert score(v, run(v, do_nothing)["cost_total"]) == (0.0 if v.mode else 1.0)
-        assert score(v, run(v, oracle)["cost_total"]) >= 0.95
+        nothing = score(v, run(v, do_nothing).cost_total)
+        assert nothing == (0.0 if v.mode else 1.0)
+        assert score(v, run(v, oracle).cost_total) >= 0.95
         assert all(m in FAULT_MODES for m in [v.mode] if m)

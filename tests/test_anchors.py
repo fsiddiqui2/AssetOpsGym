@@ -16,21 +16,21 @@ from assetopsgym.server.sim import Sim
 @pytest.mark.parametrize("vid", sorted(VARIANTS))
 def test_anchors(vid):
     v = VARIANTS[vid]
-    nothing = score(v, run(v, do_nothing)["cost_total"])
+    nothing = score(v, run(v, do_nothing).cost_total)
     if v.mode:
         reactive, best = reference_costs(v)
         assert reactive > best
         assert nothing == 0.0
-        assert score(v, run(v, oracle)["cost_total"]) >= 0.95
+        assert score(v, run(v, oracle).cost_total) >= 0.95
     else:
         assert nothing >= 0.95
     for name, policy in SHORTCUTS.items():
-        assert score(v, run(v, policy)["cost_total"]) <= 0.8, name
+        assert score(v, run(v, policy).cost_total) <= 0.8, name
 
 
 def test_no_alarms_or_costs_when_healthy():
     r = run(VARIANTS["healthy"], do_nothing)
-    assert r["alerts"]["operator_alarm"] == 0 and r["cost_total"] == 0
+    assert r.alerts["operator_alarm"] == 0 and r.cost_total == 0
 
 
 def test_faults_reach_an_operator_alarm_before_failing():
@@ -48,9 +48,10 @@ def test_reset_seed_varies_the_run_and_keeps_the_anchors(vid):
     runs = [replace(VARIANTS[vid], seed=s) for s in (0, 1, 2)]
     assert len({tuple(map(str, Sim(v).history[:96])) for v in runs}) == 3
     for v in runs:
-        nothing = score(v, run(v, do_nothing)["cost_total"])
+        nothing = score(v, run(v, do_nothing).cost_total)
         if v.mode:
-            assert nothing == 0.0 and score(v, run(v, oracle)["cost_total"]) >= 0.95
+            best = score(v, run(v, oracle).cost_total)
+            assert nothing == 0.0 and best >= 0.95
         else:
             assert nothing >= 0.95
 

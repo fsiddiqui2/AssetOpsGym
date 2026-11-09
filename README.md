@@ -93,10 +93,10 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 
 | file | what |
 |---|---|
-| `schemas.py` | the four team interfaces as pydantic models: scenario, simulator API, ledger events, agent tool list (draft; `tests/test_schemas.py` keeps them honest against the code) |
+| `schemas.py` | the team interfaces as frozen dataclasses: simulator API, ledger events, agent tool results (draft; `tests/test_schemas.py` keeps them honest against the code) |
 | `profiling.py` | span timing for every rollout stage, the per-episode fold (LLM/env split, tokens per simulated hour), JSONL and W&B sinks, GPU sampler |
 | `server/sim.py` | the simulator (pure, deterministic): wires the parts below and runs the 15-min tick loop |
-| `server/variant.py` | `Variant` (scenario knobs), crew, the clock |
+| `server/variant.py` | `Variant` (the only scenario type; `from_dict` loads a table row), crew, the clock |
 | `server/telemetry.py` | sensors, load/weather, blips, the per-tick sample |
 | `server/faults.py` | failure codes, fault severity, the trip |
 | `server/alerts.py` | BMS rules, operator alarms, z-score analytics, ack/shelve |

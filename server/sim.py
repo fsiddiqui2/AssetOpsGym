@@ -12,8 +12,9 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta
 
+from ..schemas import EpisodeResult, KPIs, SimState, TelemetryRow
 from . import alerts, faults, ledger, maintenance, report, telemetry
-from .variant import TICK, TICK_H, Variant, iso
+from .variant import TICK, TICK_H, Variant
 
 
 class Sim:
@@ -40,11 +41,11 @@ class Sim:
     failed_at = property(lambda s: s.fault.failed_at)
     done = property(lambda s: s.now >= s.v.end)
 
-    def advance(self, hours: float) -> list[dict]:
+    def advance(self, hours: float) -> list[TelemetryRow]:
         ticks = max(1, round(hours / TICK_H))
         return self._run_until(min(self.now + ticks * TICK, self.v.end))
 
-    def run_to_end(self) -> list[dict]:
+    def run_to_end(self) -> list[TelemetryRow]:
         return self._run_until(self.v.end)
 
     def severity(self, t: datetime) -> float:
@@ -75,17 +76,17 @@ class Sim:
     def visible_alerts(self) -> list[alerts.Alert]:
         return alerts.visible(self.bms)
 
-    def state(self) -> dict:
+    def state(self) -> SimState:
         return report.state(self.v, self.now, self.fault, self.maint)
 
-    def kpis(self) -> dict:
+    def kpis(self) -> KPIs:
         return report.kpis(self.book, self.fault, self.maint, self.alerts)
 
-    def result(self) -> dict:
+    def result(self) -> EpisodeResult:
         return report.result(self.v, self.book, self.fault, self.maint,
                              self.alerts)
 
-    def _run_until(self, target: datetime) -> list[dict]:
+    def _run_until(self, target: datetime) -> list[TelemetryRow]:
         rows = []
         while self.now < target:
             rows.append(self._tick(self.now))
@@ -94,7 +95,7 @@ class Sim:
             ledger.close(self.book, self.now)
         return rows
 
-    def _tick(self, t: datetime) -> dict:
+    def _tick(self, t: datetime) -> TelemetryRow:
         f, events = self.fault, self.events
         maintenance.service(self.maint, self.book, f, self.v, t)
         s = faults.severity(f, t)
@@ -112,4 +113,4 @@ class Sim:
                                   s, self.v.blips_per_day)
         ledger.energy(self.book, t, running, self.plant.excess_kw)
         alerts.evaluate(self.bms, events, t, values, running)
-        return {"timestamp": iso(t), "values": values}
+        return TelemetryRow(t, values)
