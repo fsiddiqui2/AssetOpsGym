@@ -4,8 +4,10 @@ OpenEnv gym: an agent watches a simulated, degrading
 chiller through AssetOpsBench's IoT and work-order MCP
 servers and is scored over a 60-day window.
 
-- `server/sim.py`: the simulator (telemetry, faults, WOs,
-  crew, ledger). Pure, no I/O.
+- `server/sim.py`: the simulator's tick loop and public
+  API; the parts live in `variant.py`, `telemetry.py`,
+  `faults.py`, `alerts.py`, `maintenance.py`, `ledger.py`,
+  `report.py`. Pure, no I/O.
 - `server/environment.py`: the OpenEnv environment
   (reset/step/state, `advance_time`, proxy to AOB).
 - `server/aob.py`: CouchDB + AOB server bridge.
@@ -36,8 +38,7 @@ W&B: `WANDB_ENTITY=hpml-projects WANDB_PROJECT=assetopsgym`
   bags, except where a framework signature forces it
   (`reset(**kwargs)` for OpenEnv).
 - **No stringly-typed data.** Data that crosses a function
-  boundary is a pydantic model (at I/O boundaries) or a
-  dataclass (inside the sim), not a `dict` with string
+  boundary is a dataclass, not a `dict` with string
   keys. Raw strings only for true external names (a
   CouchDB field, an MCP tool name), each defined once.
   Counter-example: `_flush_changes` in `environment.py`
@@ -66,6 +67,69 @@ W&B: `WANDB_ENTITY=hpml-projects WANDB_PROJECT=assetopsgym`
   (teammates merge against it).
 - **File size:** keep files under ~400 lines; split by
   purpose, not by size alone.
+
+## Design decisions (2026-11-09)
+
+Being implemented by the refactor stacked on `rares/mise`
+(`rares/quick-fixes` → `rares/sim-split` →
+`rares/env-boundary` → ...); code not yet changed may
+still do the old thing.
+
+- **The events are the record.** The ledger's event list
+  is the only record of what happened. Cost totals, KPIs,
+  the episode result and the CouchDB work-order documents
+  are folds over it; nothing keeps a second copy. Other
+  services read it with `fetch(since, types)`: JSON plus
+  a cursor.
+- **Work orders are timed events, not a status ladder.**
+  A heap of (time, action) entries (approve, arrive,
+  start, finish); an edit bumps the order's version and
+  stale entries are dropped. Status is derived from the
+  timestamps, never stored.
+- **`sim.py` only orchestrates** (~60 lines: the tick
+  loop and the public API). Each concern is a module
+  with a state dataclass plus plain functions: telemetry,
+  faults, alerts, maintenance, ledger, variant.
+- **Dataclasses, not pydantic.** `@dataclass(frozen=True,
+  slots=True)`: 64 B per instance against 480 B for a
+  pydantic model. Pydantic stays only where a framework
+  forces it (OpenEnv's `State`/`Action`/`Observation`);
+  fastmcp and openenv import it anyway, so dropping it
+  saves per-object memory, not the library. FastMCP
+  builds tool output schemas from dataclasses.
+- **A new scenario setting is at most 5 lines.** One
+  `Variant` dataclass is the only scenario type: add a
+  field with a default, read it where it matters. A
+  generic `from_dict` loads tables (Astrid's suite) with
+  no parser change. Unused settings are fine.
+- **`schemas.py` holds a type iff two modules use it.**
+  Module-private types stay in their module.
+- **The gym owns the work-order writes.** It implements
+  AssetOpsBench's `generate_work_order`, `update_workorder`
+  and `cancel_workorder` with AOB's signatures and result
+  shape; CouchDB is a mirror and AOB's WO server serves
+  the reads. This removes the WO date patching. The one
+  wall-clock patch left is `latest_reading`'s age (AOB
+  reads the real clock there); remove it with an upstream
+  PR that adds a `now` parameter (T11's contribution).
+- **Errors: one exception class plus an enum.**
+  `GymError(code: ErrorCode, message)` is the only
+  exception subclass (the one allowed exception to "no
+  OOP"). Tools return `ErrorResult(error, error_code)` as
+  a normal result: AOB's `{"error": ...}` shape plus the
+  code AOB drops. Unknown asset, unknown failure code and
+  edits after a technician arrives are errors, never
+  silently ignored.
+- **The tool list lives only in `openenv.yaml`.** A plain
+  loader reads it at start; which server owns a tool is
+  derived at boot (gym registry vs AOB `list_tools`), and
+  a mismatch raises.
+- **Ports:** gym server 8000 (OpenEnv convention), vLLM
+  8001.
+- **`reset()` without a seed draws one and returns it**,
+  so every run is replayable.
+- Parked: a second architecture discussion (review item
+  6), CI, the Dockerfile, and the package layout.
 
 ## Invariants (break these and the benchmark is wrong)
 
