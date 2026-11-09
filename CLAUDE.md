@@ -10,6 +10,11 @@ servers and is scored over a 60-day window.
   `report.py`. Pure, no I/O.
 - `server/environment.py`: the OpenEnv environment
   (reset/step/state, `advance_time`, proxy to AOB).
+- `server/tools.py`: the tool manifest check, the error
+  wrapper, AOB tools re-exposed, AOB's WO write
+  signatures (the gym serves them).
+- `server/mirror.py`: CouchDB as a mirror of the sim
+  (catalogs, telemetry rows, WO documents from events).
 - `server/aob.py`: CouchDB + AOB server bridge.
 - `server/scenarios.py`: variants and the score.
 - `infra/`: GPU + vLLM for the agent. `gcp.sh` (your own
@@ -70,17 +75,16 @@ W&B: `WANDB_ENTITY=hpml-projects WANDB_PROJECT=assetopsgym`
 
 ## Design decisions (2026-11-09)
 
-Being implemented by the refactor stacked on `rares/mise`
-(`rares/quick-fixes` → `rares/sim-split` →
-`rares/env-boundary` → ...); code not yet changed may
-still do the old thing.
+Implemented by the refactor stacked on `rares/mise`
+(`rares/quick-fixes` → `rares/sim-split` → ... →
+`rares/wo-tools`), except the parked items at the end.
 
 - **The events are the record.** The ledger's event list
   is the only record of what happened. Cost totals, KPIs,
   the episode result and the CouchDB work-order documents
   are folds over it; nothing keeps a second copy. Other
   services read it with `fetch(since, types)`: JSON plus
-  a cursor.
+  a cursor (`read()` is the typed in-process form).
 - **Work orders are timed events, not a status ladder.**
   A heap of (time, action) entries (approve, arrive,
   start, finish); an edit bumps the order's version and
