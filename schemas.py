@@ -5,7 +5,7 @@ Drafted from what the MVP already does, so every model here round-trips an objec
 the code produces today (see tests/test_schemas.py). The simulator keeps its
 dataclasses internally; these are the contracts T2, T4, T7 and T8 write to.
 
-    1. Scenario          what one task variant specifies           (T1, T2)
+    1. Scenario          what one task variant specifies (Variant)  (T1, T2)
     2. Simulator API     advance, inject a fault, repair, read state (T5, T6, T8)
     3. Ledger events     costs, downtime, failures, alerts, requests (T2, T7, T8)
     4. Agent tool results  what the gym's own tools return     (T3, T4, T9)
@@ -24,78 +24,9 @@ WoStatus = Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
 AlertKind = Literal["operator_alarm", "analytics"]
 
 # ----------------------------------------------------------------------------
-# 1. Scenario format
+# 1. Scenario format: server/variant.py's Variant (frozen dataclass);
+#    variant.from_dict loads a table row into it.
 # ----------------------------------------------------------------------------
-
-
-class FaultSpec(BaseModel):
-    """One latent fault. `mode` is a failure code the simulator knows (sim.FAILURE_CODES);
-    kept as a string, not an enum, so Dhaval's MATLAB modes can be added as data."""
-
-    model_config = ConfigDict(frozen=True)
-
-    mode: str = Field(description="failure code, e.g. CH-REFLEAK")
-    onset_day: float = Field(ge=0, description="days after the episode start when degradation begins")
-    pf_days: float = Field(gt=0, description="P-F interval: days from onset to functional failure (trip)")
-    shape: Literal["power"] = Field("power", description="severity curve family; only 'power' so far")
-    exponent: float = Field(1.6, gt=0, description="severity = ((t - onset) / pf_days) ** exponent")
-
-
-class Technician(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    id: str
-    skills: Optional[list[str]] = Field(None, description="failure codes this technician can repair; None = all")
-    travel_h: float = Field(0.0, ge=0, description="added to every response time")
-
-
-class CrewSpec(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    technicians: list[Technician] = Field(min_length=1)
-    noshow: float = Field(0.05, ge=0, le=1, description="chance a scheduled, non-emergency visit slips a day")
-
-
-class Scenario(BaseModel):
-    """What one task variant specifies. `fault=None` is a healthy twin."""
-
-    model_config = ConfigDict(frozen=True)
-
-    id: str
-    fault: Optional[FaultSpec] = None
-    blips_per_day: float = Field(1.0, ge=0, description="transient sensor glitches per day")
-    crew: CrewSpec = CrewSpec(technicians=[Technician(id="TECH-01"), Technician(id="TECH-02")])
-    load_profile: Literal["office"] = "office"
-    seed: int = 0
-    start: datetime = datetime(2026, 6, 1)
-    history_days: int = Field(14, ge=0, description="telemetry available before the episode starts")
-    horizon_days: int = Field(60, gt=0)
-    held_out: bool = Field(False, description="kept out of the main suite for the shift study")
-    tags: list[str] = Field(default_factory=list)
-
-    @property
-    def scoring(self) -> Literal["faulty", "healthy"]:
-        return "faulty" if self.fault else "healthy"
-
-    # Bridges to the simulator's own Variant, until Sim takes a Scenario directly.
-    @classmethod
-    def from_variant(cls, v) -> "Scenario":
-        fault = FaultSpec(mode=v.mode, onset_day=v.onset_day, pf_days=v.pf_days) if v.mode else None
-        crew = CrewSpec(technicians=[Technician(id=t.id, skills=None if t.skills is None else list(t.skills),
-                                                travel_h=t.travel_h) for t in v.crew], noshow=v.noshow)
-        return cls(id=v.id, fault=fault, blips_per_day=v.blips_per_day, crew=crew, seed=v.seed, start=v.start,
-                   history_days=v.history_days, horizon_days=v.horizon_days)
-
-    def to_variant(self):
-        from .server.sim import Technician as _T, Variant
-
-        crew = tuple(_T(t.id, None if t.skills is None else tuple(t.skills), t.travel_h)
-                     for t in self.crew.technicians)
-        f = self.fault
-        return Variant(self.id, f.mode if f else None, onset_day=f.onset_day if f else 0.0,
-                       pf_days=f.pf_days if f else 20.0, blips_per_day=self.blips_per_day,
-                       noshow=self.crew.noshow, seed=self.seed, start=self.start,
-                       history_days=self.history_days, horizon_days=self.horizon_days, crew=crew)
 
 
 # ----------------------------------------------------------------------------

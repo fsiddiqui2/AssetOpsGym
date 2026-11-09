@@ -13,8 +13,7 @@ import random
 from datetime import datetime, timedelta
 
 from . import alerts, faults, ledger, maintenance, report, telemetry
-from .variant import TICK, TICK_H, Technician, Variant, iso  # noqa: F401
-# Technician: schemas.Scenario.to_variant still imports it from here.
+from .variant import TICK, TICK_H, Variant, iso
 
 
 class Sim:
@@ -23,7 +22,8 @@ class Sim:
         self.rng = random.Random(variant.seed)
         self.now = variant.start - timedelta(days=variant.history_days)
         self.fault = faults.Fault(variant.mode, variant.onset,
-                                  variant.pf_days, variant.mode is not None)
+                                  variant.pf_days, variant.exponent,
+                                  variant.mode is not None)
         self.plant, self.bms = telemetry.Plant(), alerts.AlertState()
         self.maint = maintenance.Maintenance()
         self.book = ledger.Ledger(self.now.date())
