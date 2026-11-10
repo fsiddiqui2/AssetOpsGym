@@ -7,10 +7,13 @@ import pytest
 
 from assetopsgym.schemas import AlertActionEvent
 from assetopsgym.server.scenarios import VARIANTS
-from assetopsgym.server.sim import (ANALYTICS_COOLDOWN, DESIGN_FLOW_GPM,
-                                    EFFICIENCY, FLOW, LOADED, POWER, REFRIG,
-                                    SETPOINT, SUPPLY, TICK, TONNAGE,
-                                    Z_WINDOW_TICKS, Sim, ZWindow)
+from assetopsgym.server.alerts import (ANALYTICS_COOLDOWN,
+                                       Z_WINDOW_TICKS, ZWindow, evaluate)
+from assetopsgym.server.sim import Sim
+from assetopsgym.server.telemetry import (DESIGN_FLOW_GPM, EFFICIENCY,
+                                          FLOW, LOADED, POWER, REFRIG,
+                                          SETPOINT, SUPPLY, TONNAGE)
+from assetopsgym.server.variant import TICK
 
 
 def test_zwindow_flags_a_step_not_noise():
@@ -87,7 +90,8 @@ def test_operator_alarm_once_per_run_of_hold_ticks():
     t = sim.now
     ticks = [low] * 10 + [ok] + [low] * 8 + [None] + [low] * 7
     for v in ticks:  # None = not running
-        sim._evaluate_rules(t, v or ok, running=v is not None)
+        evaluate(sim.bms, sim.events, t, v or ok,
+                 running=v is not None)
         t += TICK
     fired = [a for a in sim.alerts if a.kind == "operator_alarm"
              and a.rule == "low_condenser_water_flow"]
@@ -98,7 +102,8 @@ def test_power_while_off_needs_three_hours_off():
     sim = Sim(VARIANTS["healthy"])
     t = sim.now
     for running in [False] * 11 + [True] + [False] * 12:
-        sim._evaluate_rules(t, {**OK, POWER: 6.0}, running=running)
+        evaluate(sim.bms, sim.events, t, {**OK, POWER: 6.0},
+                 running=running)
         t += TICK
     fired = [a for a in sim.alerts if a.rule == "power_while_off"]
     assert len(fired) == 1 and fired[0].kind == "operator_alarm"

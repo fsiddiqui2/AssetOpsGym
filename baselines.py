@@ -9,7 +9,8 @@ threshold-plus-on-delay rule is the non-LLM baseline an agent has to beat.
 from __future__ import annotations
 
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
-from assetopsgym.server.sim import FAULT_MODES, Sim
+from assetopsgym.server.faults import FAULT_MODES
+from assetopsgym.server.sim import Sim
 
 RULE_CODE = {
     "low_condenser_water_flow": "CH-CWFLOW",

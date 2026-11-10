@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from .sim import DISPATCH_COST, Sim, Variant
+from .maintenance import DISPATCH_COST
+from .sim import Sim
+from .variant import Variant
 
 HEALTHY_SCALE = 5 * DISPATCH_COST
 

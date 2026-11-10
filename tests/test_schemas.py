@@ -9,8 +9,11 @@ import yaml
 from assetopsgym.schemas import (AGENT_TOOLS, AlertEvent, CostEvent, EpisodeResult, Scenario, SimState,
                                  Technician)
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
-from assetopsgym.server.sim import CONTRACTOR_DELAY_H, FAULT_MODES, Sim, Variant
-from assetopsgym.server.sim import Technician as SimTech
+from assetopsgym.server.faults import FAULT_MODES
+from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
+from assetopsgym.server.sim import Sim
+from assetopsgym.server.variant import Technician as SimTech
+from assetopsgym.server.variant import Variant
 from pathlib import Path
 
 
