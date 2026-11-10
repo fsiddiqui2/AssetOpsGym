@@ -54,6 +54,8 @@ First zero-shot run: `openai/gpt-5-mini` on `refleak_mid`, capped at 40 turns, s
 
 Prerequisites: an AssetOpsBench checkout with `uv sync` done (`AOB_DIR`, default `../AssetOpsBench`), and CouchDB running (`docker compose -f src/couchdb/docker-compose.yaml up -d` in that checkout).
 
+With [mise](https://mise.jdx.dev): `mise trust && mise install`, then `mise tasks` (setup, couch, test, server, agent, baselines, vllm, gcp, ...). Without it:
+
 ```bash
 uv sync --extra agent --extra dev
 uv run pytest -q                               # anchors + end-to-end through the AOB servers
