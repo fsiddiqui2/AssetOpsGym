@@ -78,5 +78,5 @@ case ${1:-} in
   stop|start) gcloud compute instances "$1" $VM \
                 --zone="$(zone)" ;;
   down) down ;;
-  *) sed -n 2,7p "$0"; exit 1 ;;
+  *) sed -n 2,7p gcp.sh; exit 1 ;;
 esac

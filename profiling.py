@@ -232,7 +232,9 @@ def wandb_run():
         import wandb
     except ImportError:
         return None
+    # outputs/: openenv validate skips it; wandb/ holds symlinks it rejects
     _wandb_run = wandb.run or wandb.init(project=os.environ["WANDB_PROJECT"], job_type="profile",
+                                         dir=os.environ.get("WANDB_DIR", "outputs"),
                                          config={k: v for k, v in os.environ.items() if k.startswith("AOG_")})
     return _wandb_run
 
