@@ -1,5 +1,5 @@
 """The event ledger: the only record of a run. Costs, downtime and
-KPIs are folds over it; fetch() serves it as JSON."""
+KPIs are folds over it; read() serves it typed, fetch() as JSON."""
 
 from __future__ import annotations
 
@@ -72,15 +72,23 @@ def downtime_hours(events: list[LedgerEvent]) -> dict[str, float]:
     return out
 
 
+def read(events: list[LedgerEvent], since: int,
+         types: tuple[type, ...] | None
+         ) -> tuple[list[LedgerEvent], int]:
+    """Events from index `since` on, and the cursor to pass next
+    time."""
+    return ([e for e in events[since:]
+             if types is None or isinstance(e, types)], len(events))
+
+
 def fetch(events: list[LedgerEvent], since: int,
           types: tuple[type, ...] | None
           ) -> tuple[list[dict], int]:
-    """Events from index `since` on, as JSON-ready dicts, and the
-    cursor to pass next time."""
-    picked = [asdict(e) for e in events[since:]
-              if types is None or isinstance(e, types)]
-    return (json.loads(json.dumps(picked, default=datetime.isoformat)),
-            len(events))
+    """read() as JSON-ready dicts."""
+    picked, cursor = read(events, since, types)
+    return (json.loads(json.dumps([asdict(e) for e in picked],
+                                  default=datetime.isoformat)),
+            cursor)
 
 
 def _close_downtime(l: Ledger, t: datetime) -> None:

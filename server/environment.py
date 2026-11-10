@@ -1,37 +1,31 @@
 """AssetOpsGym as an OpenEnv MCPEnvironment.
 
-The agent sees two kinds of MCP tools, all routed through step():
-  * AssetOpsBench's own IoT and work-order tools, proxied to real server
+The agent's MCP tools, all routed through step():
+  * AssetOpsBench's IoT tools and WO read tools, proxied to real server
     processes reading this episode's CouchDB databases;
-  * the gym's tools: current_time, advance_time, finish;
-  * the alert tools: list_alerts, acknowledge_alert, shelve_alert.
+  * the gym's: current_time, advance_time, finish, the alert tools, and
+    AssetOpsBench's WO writes (generate_work_order, update_workorder,
+    cancel_workorder) on the simulator, mirrored to CouchDB.
 
-The world is frozen between calls. advance_time is the only thing that moves the
-clock: the simulator runs, new telemetry is written to CouchDB (only the past is
-ever stored), and the maintenance organization acts on the work orders the agent
-filed through the WO server. The episode ends at the 60-day horizon or on
+The world is frozen between calls. advance_time is the only thing that
+moves the clock: the simulator runs, new telemetry is written to CouchDB
+(only the past is ever stored), and the maintenance organization works
+the agent's work orders. The episode ends at the 60-day horizon or on
 finish(); the final observation carries the score as its reward.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
 import secrets
 import threading
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastmcp import FastMCP
-from fastmcp.tools import Tool as FastMCPTool
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
-from pydantic import Field
 from pydantic_core import to_jsonable_python
-from pydantic.json_schema import SkipJsonSchema
 from openenv.core.env_server.mcp_environment import MCPEnvironment
 from openenv.core.env_server.types import Action, Observation, State
 
@@ -40,19 +34,21 @@ from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
                        ClockResult, EpisodeResult, ErrorCode,
                        ErrorResult, FinishResult, GymError,
                        ListAlertsResult, ServiceRequestEvent,
-                       ShelveResult, TelemetryRow, WorkOrderUpdate)
+                       ShelveResult, WorkOrderMutationResult,
+                       WorkOrderUpdate)
+from . import ledger, mirror
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
-from .faults import FAILURE_CODES
 from .prompt import INSTRUCTION
+from .maintenance import WorkOrder
 from .sim import Sim
-from .telemetry import ASSET, INSTALLED_SENSORS, SITE
-from .tools import MANIFEST, _errors_as_results, check_tools
+from .telemetry import ASSET, SITE
+from .tools import (MANIFEST, _errors_as_results, check_tools,
+                    forward_tool, wo_write_tools)
 from .variant import Variant, iso
 
 MAX_ADVANCE_H = 168
-logger = logging.getLogger(__name__)
 
 
 class GymState(State):
@@ -75,37 +71,6 @@ def pick_variant(variant: Optional[str],
     if seed is None:
         return v
     return replace(v, seed=seed)  # also keys the reference_costs cache
-
-
-def _wo_time(t: datetime) -> str:
-    return t.strftime("%Y-%m-%dT%H:%M:%S+00:00")  # the WO server's own date format
-
-
-class _ForwardTool(FastMCPTool):
-    """An AssetOpsBench tool re-exposed by the gym's own MCP server, so it is reachable
-    both through step() and through OpenEnv's direct /mcp route."""
-
-    forward: SkipJsonSchema[Any] = Field(exclude=True)
-
-    async def run(self, arguments: dict[str, Any]) -> ToolResult:
-        data = to_jsonable_python(await asyncio.to_thread(
-            self.forward, self.name, arguments))
-        return ToolResult(content=[TextContent(type="text", text=json.dumps(data, default=str))],
-                          structured_content={"result": data})
-
-
-_WRAPPED_OUTPUT = {"type": "object", "properties": {"result": {}}, "required": ["result"],
-                   "x-fastmcp-wrap-result": True}
-
-
-
-def _replace_dates(obj: Any, value: str) -> Any:
-    if isinstance(obj, dict):
-        return {k: value if k in ("reportdate", "status_date") and v else _replace_dates(v, value)
-                for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_replace_dates(x, value) for x in obj]
-    return obj
 
 
 class AssetOpsGymEnvironment(MCPEnvironment):
@@ -165,8 +130,14 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             """End your shift now. The rest of the horizon is simulated without you and the episode is scored."""
             return await asyncio.to_thread(env._locked, env._finish)
 
+        async def write(verb: str, apply: Callable[[Sim], WorkOrder]
+                        ) -> WorkOrderMutationResult | ErrorResult:
+            return await asyncio.to_thread(
+                env._locked, env._write, verb, apply)
+
         gym = (current_time, advance_time, list_alerts,
-               acknowledge_alert, shelve_alert, finish)
+               acknowledge_alert, shelve_alert, finish,
+               *wo_write_tools(write))
         for fn in gym:
             mcp.tool(fn)
         super().__init__(mcp)
@@ -176,17 +147,17 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         with self.prof.span("env.boot"):
             self.couch = Couch(f"aog_{uuid.uuid4().hex[:10]}")
             self.couch.recreate()
-            self.bridge = AOBBridge(self.couch.server_env())
-        self.proxied: dict[str, str] = {}  # tool name -> AssetOpsBench server
-        own = {fn.__name__ for fn in gym}
-        for server in self.bridge.sessions:
-            for t in self.bridge.list_tools(server):
-                if t.name in MANIFEST.tools and t.name not in own:
-                    self.proxied[t.name] = server
-                    mcp.add_tool(_ForwardTool(name=t.name, description=t.description or "",
-                                              parameters=t.inputSchema, output_schema=_WRAPPED_OUTPUT,
-                                              forward=self._call_proxied))
-        check_tools([*own, *self.proxied], MANIFEST.tools)
+            # the gym owns the WO writes: AOB's WO server serves reads
+            self.bridge = AOBBridge(
+                {**self.couch.server_env(), "AOB_READONLY": "1"})
+        aob = [(server, t) for server in self.bridge.sessions
+               for t in self.bridge.list_tools(server)
+               if t.name in MANIFEST.tools]
+        check_tools([fn.__name__ for fn in gym]
+                    + [t.name for _, t in aob], MANIFEST.tools)
+        self.proxied = {t.name: server for server, t in aob}
+        for _, t in aob:
+            mcp.add_tool(forward_tool(t, self._call_proxied))
         self.sim: Sim | None = None
         self._result: EpisodeResult | None = None
         self._profile: dict | None = None
@@ -208,14 +179,12 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             with self.prof.span("sim.history"):
                 self.sim = Sim(v)
             self._result, self._profile = None, None
-            self._wo_seen = 0  # events already mirrored to CouchDB
+            self._wo_seen = 0  # ledger cursor: events mirrored to CouchDB
             with self.prof.span("couch.recreate"):
                 self.couch.recreate()
-                self.couch.bulk("asset", [_asset_doc()])
-                self.couch.bulk("fc", [{"_id": f"fc:{c.code}", "code": c.code, "description": c.description,
-                                        "dataset": "failure_code"} for c in FAILURE_CODES.values()])
+                mirror.seed(self.couch)
             with self.prof.span("couch.write_rows", rows=len(self.sim.history)):
-                self._write_rows(self.sim.history)
+                mirror.write_rows(self.couch, self.sim.history)
             with self.prof.span("sim.reference_runs"):
                 reference_costs(v)  # warm the score's reference runs now, not at the last step
         self._state = GymState(
@@ -268,27 +237,30 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         return ClockResult(sim_time=sim.now, shift_end=sim.v.end,
                            hours_left=left)
 
-    @_errors_as_results
-    def _advance(self, hours: float) -> AdvanceTimeResult:
-        self._running_sim()
+    def _live_sim(self) -> Sim:
+        sim = self._running_sim()
         if self._result is not None:
             raise GymError(ErrorCode.EPISODE_OVER,
-                           "the episode is over")
+                           "the episode is over; call reset")
+        return sim
+
+    @_errors_as_results
+    def _advance(self, hours: float) -> AdvanceTimeResult:
+        self._live_sim()
         if not 0.25 <= hours <= MAX_ADVANCE_H:
             raise GymError(
                 ErrorCode.BAD_ARGUMENT,
                 f"hours must be between 0.25 and {MAX_ADVANCE_H}")
         with self.prof.span("tool.advance_time", hours=hours):
-            with self.prof.span("couch.sync_wo"):
-                self._sync_work_orders()
             seen, before = len(self.sim.alerts), self.sim.now
             with self.prof.span("sim.advance") as sp:
                 rows = self.sim.advance(hours)
                 sp.set(sim_hours=(self.sim.now - before).total_seconds() / 3600, rows=len(rows))
             with self.prof.span("couch.write_rows", rows=len(rows)):
-                self._write_rows(rows)
-            with self.prof.span("couch.flush_wo"):
-                updates = self._flush_changes()
+                mirror.write_rows(self.couch, rows)
+            updates = [WorkOrderUpdate(wonum=e.wonum, status=e.status,
+                                       time=e.time, note=e.note)
+                       for e in self._mirror()]
         alerts = [a.public() for a in self.sim.alerts[seen:] if not a.shelved]
         out = AdvanceTimeResult(
             sim_time=self.sim.now, shift_end=self.sim.v.end,
@@ -348,121 +320,43 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return fn(*args)
 
     @_errors_as_results
+    def _write(self, verb: str, apply: Callable[[Sim], WorkOrder]
+               ) -> WorkOrderMutationResult:
+        wo = apply(self._live_sim())
+        self._mirror()
+        item = mirror.work_order_item(self.sim.events, wo.wonum)
+        return WorkOrderMutationResult(
+            wonum=wo.wonum, siteid=SITE, status=item.status,
+            work_order=item, message=f"Work order {wo.wonum} {verb}.")
+
+    def _mirror(self) -> list[ServiceRequestEvent]:
+        """Write the WO documents of the events past the cursor;
+        returns those events."""
+        with self.prof.span("couch.flush_wo"):
+            new, cursor = ledger.read(self.sim.events, self._wo_seen,
+                                      (ServiceRequestEvent,))
+            mirror.write_work_orders(self.couch, self.sim.events,
+                                     {e.wonum for e in new})
+        self._wo_seen = cursor
+        return new
+
+    @_errors_as_results
     def _call_proxied(self, name: str, arguments: dict) -> Any:
-        self._running_sim()
-        if self._result is not None:
-            raise GymError(ErrorCode.EPISODE_OVER,
-                           "the episode is over; call reset")
+        self._live_sim()
         with self._lock, self.prof.span("mcp.aob", server=self.proxied[name], tool=name):
             data = self.bridge.call(self.proxied[name], name, arguments)
-            if name == "update_workorder" and arguments.get("notes") is not None:
-                self._keep_tech_log(arguments, data)
-            return self._fix_clock(name, data)
-
-    def _keep_tech_log(self, arguments: dict, data: Any) -> None:
-        """The WO server's update_workorder(notes=...) replaces the long description, which is
-        also where the planner and technicians write. Rebuild it: their log, then the agent's note."""
-        wonum = arguments.get("wonum")
-        doc = self.couch.get("wo", f"wo:{(arguments.get('site_id') or SITE).upper()}:{wonum}")
-        if doc is None:
-            return
-        log = "\n".join(
-            _wo_log(e) for e in self.sim.events
-            if isinstance(e, ServiceRequestEvent) and e.wonum == wonum
-            and e.actor != "agent")
-        doc["description_longdescription"] = (log + "\n" if log else "") + \
-            f"[{iso(self.sim.now)}] Agent: {arguments['notes']}"
-        self.couch.put("wo", doc)
-        if isinstance(data, dict) and isinstance(data.get("work_order"), dict):
-            data["work_order"]["description_longdescription"] = doc["description_longdescription"]
-
-    def _fix_clock(self, name: str, data: Any) -> Any:
-        """AssetOpsBench servers read the wall clock; rewrite to simulated time."""
-        if not isinstance(data, dict):
+            if name == "latest_reading" and isinstance(data, dict) \
+                    and "timestamp" in data:
+                data["age_seconds"] = self._age(data["timestamp"])
             return data
-        now = self.sim.now
-        if name == "latest_reading" and data.get("timestamp"):
-            data["age_seconds"] = (now - datetime.fromisoformat(data["timestamp"])).total_seconds()
-        if name in ("generate_work_order", "cancel_workorder") and data.get("wonum"):
-            doc = self.couch.get("wo", f"wo:{(data.get('siteid') or SITE).upper()}:{data['wonum']}")
-            if doc:
-                key = "reportdate" if name == "generate_work_order" else "status_date"
-                doc[key] = _wo_time(now)
-                self.couch.put("wo", doc)
-            data = _replace_dates(data, _wo_time(now))
-        return data
 
-    def _sync_work_orders(self) -> None:
-        """Feed the agent's work-order writes (made through the WO server) into the simulator."""
-        for doc in self.couch.find("wo", {"type": "workorder"}):
-            wonum, cancel = doc["wonum"], doc.get("status") == "CAN"
-            wo = self.sim.wos.get(wonum)
-            try:
-                if wo is None:
-                    if not cancel and doc.get("assetnum") == ASSET:
-                        self.sim.file_wo(doc.get("failurecode"),
-                                         doc.get("wopriority", 3),
-                                         wonum=wonum)
-                elif cancel:
-                    if not wo.canceled:
-                        self.sim.cancel_workorder(wonum, SITE)
-                else:
-                    self.sim.update_workorder(
-                        wonum, SITE, priority=doc.get("wopriority"),
-                        failure_code=doc.get("failurecode"))
-            except GymError as e:  # ponytail: wave 3b returns it to the agent
-                logger.warning("work order %s not applied: %s",
-                               wonum, e.message)
-
-    def _flush_changes(self) -> list[WorkOrderUpdate]:
-        """Mirror the planner's, crew's and BMS's work-order events to
-        CouchDB; the agent's own writes went through the WO server."""
-        new = self.sim.events[self._wo_seen:]
-        self._wo_seen = len(self.sim.events)
-        updates = []
-        for e in new:
-            if (not isinstance(e, ServiceRequestEvent)
-                    or e.actor == "agent"):
-                continue
-            self.couch.put("wo", self._wo_doc(e))
-            updates.append(WorkOrderUpdate(
-                wonum=e.wonum, status=e.status, time=e.time,
-                note=e.note))
-        return updates
-
-    def _wo_doc(self, e: ServiceRequestEvent) -> dict:
-        doc = self.couch.get("wo", f"wo:{e.site}:{e.wonum}") or {
-            "_id": f"wo:{e.site}:{e.wonum}", "type": "workorder",
-            "schema_version": "1.0.0", "wonum": e.wonum,
-            "siteid": e.site, "description": e.description,
-            "assetnum": e.asset, "worktype": e.work_type,
-            "reportdate": _wo_time(e.time),
-            "reportedby": e.reported_by}
-        doc["status"], doc["wopriority"] = e.status, e.priority
-        doc["status_date"] = _wo_time(e.time)
-        if e.code:
-            doc["failurecode"] = e.code
-        if e.arrive_at:
-            doc["wplabor"] = [{"laborcode": e.tech, "craft": "HVAC",
-                               "startdate": _wo_time(e.arrive_at)}]
-        if e.labor_hours is not None:
-            doc["actfinish"] = _wo_time(e.time)
-            doc["actlabhrs"] = e.labor_hours
-        if e.note:
-            old = doc.get("description_longdescription")
-            doc["description_longdescription"] = (
-                f"{old}\n" if old else "") + _wo_log(e)
-        return doc
-
-    def _write_rows(self, rows: list[TelemetryRow]) -> None:
-        self.couch.bulk("iot", [
-            {"_id": f"iot:{ASSET}:{iso(r.timestamp)}", "asset_id": ASSET,
-             "timestamp": iso(r.timestamp), **r.values} for r in rows])
+    def _age(self, timestamp: str) -> float:
+        """AOB's latest_reading ages from the wall clock."""
+        t = datetime.fromisoformat(timestamp)
+        return (self.sim.now - t).total_seconds()
 
     def _end(self, reason: str) -> None:
         with self.prof.span("env.end", reason=reason):
-            with self.prof.span("couch.sync_wo"):
-                self._sync_work_orders()
             before = self.sim.now
             with self.prof.span("sim.run_to_end") as sp:
                 self.sim.run_to_end()  # ponytail: rows after an early finish are not written; nobody can read them
@@ -497,13 +391,3 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             obs.metadata = {**obs.metadata, "result": {
                 **to_jsonable_python(r), "profile": profile}}
         return obs
-
-
-def _wo_log(e: ServiceRequestEvent) -> str:
-    return f"[{iso(e.time)}] {e.note}"
-
-
-def _asset_doc() -> dict:
-    return {"_id": f"asset:{ASSET}", "assetnum": ASSET, "description": f"{ASSET} (chilled-water plant)",
-            "siteid": SITE, "orgid": "RIVPLANT", "status": "OPERATING", "assettype": "CHILLER",
-            "location": "MAIN-MECH-CH6", "sensors": INSTALLED_SENSORS, "dataset": "asset"}

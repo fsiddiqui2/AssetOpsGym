@@ -29,7 +29,7 @@ Span names are dotted; the first segment is the stage. The ones the code emits:
     tool.<name>                             the gym's own tool bodies (advance_time, ...)
     sim.advance                             the pure simulator (attrs: sim_hours, rows)
     sim.run_to_end                          finish()'s fast-forward (attrs: sim_hours_skipped)
-    couch.write_rows  couch.sync_wo  couch.flush_wo
+    couch.write_rows  couch.flush_wo        flush_wo: WO docs, per write/advance
     mcp.aob                                 a proxied AssetOpsBench call (attrs: server, tool)
     llm.chat                                agent side (attrs: prompt_tokens, completion_tokens)
     client.step                             agent side, one env.step over HTTP (attrs: tool)

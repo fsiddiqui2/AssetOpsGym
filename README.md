@@ -8,15 +8,15 @@ An [OpenEnv](https://github.com/openenv/OpenEnv) environment where an LLM agent 
 - **Data.** Telemetry for Chiller 6 (AssetOpsBench sensor names, 15-minute rows) lands in this episode's own CouchDB as time advances. The database only ever holds the past.
 - **Tools.**
   - AssetOpsBench IoT tools: `history`, `sensor_stats`, `latest_reading`, …
-  - AssetOpsBench work-order tools: `generate_work_order`, `update_workorder`, `get_workorder`, …
-  - Gym tools (in-process): `current_time`, `advance_time`, `finish`, and the alert tools `list_alerts`, `acknowledge_alert`, `shelve_alert`.
+  - AssetOpsBench work-order reads: `get_workorder`, `list_workorders`, `get_failure_codes` (its WO server runs with `AOB_READONLY=1`).
+  - Gym tools (in-process): `current_time`, `advance_time`, `finish`, the alert tools `list_alerts`, `acknowledge_alert`, `shelve_alert`, and AssetOpsBench's work-order writes `generate_work_order`, `update_workorder`, `cancel_workorder` (its names, arguments and result shape; `aob_source` left out). A wrong asset, an unknown failure code or an edit after the technician arrived comes back as `{"error", "error_code"}`.
   - The list the agent sees is `declared_tools` in `openenv.yaml`; the environment refuses to boot if its tools differ.
 - **Faults.** One latent fault per faulty variant grows from its onset until the chiller trips. Its primary sensor:
   - condenser flow restriction: condenser water flow
   - refrigerant leak: evaporator approach
   - compressor wear: % loaded vs tonnage
 - **Alerts.** The building management system raises operator alarms (fixed threshold held 2–3 h, late; 7 rules, 2 of them from AssetOpsBench's chiller rules) and analytics alerts (rule metric 3σ above its own last 24 h; about 1.5 a day when healthy, 3.7 with blips; they carry no fault signal). The agent can acknowledge an alert or shelve a rule for up to 168 h; shelved alerts are recorded but hidden, so shelving the fault's rule hides its alarm.
-- **Maintenance.** The planner approves the agent's work orders and a technician comes. Technicians may not show up, and the compressor job waits 48 h for parts. The technician does the work named by the failure code, and everything is written back to the work-order store, where the agent can read it.
+- **Maintenance.** The planner approves the agent's work orders and a technician comes. Technicians may not show up, and the compressor job waits 48 h for parts. The technician does the work named by the failure code. The work-order documents in CouchDB are a fold over the ledger's events, rewritten after every write and every `advance_time`; AssetOpsBench's WO server reads them.
 - **Ledger.** Every cost, downtime span, failure, alert and work-order transition is a typed event (`schemas.LedgerEvent`) in `Sim.events`; the score's totals and the proposal's five KPIs (downtime, missed failures, false dispatches, alert load, SLA breaches) are folds over it.
 - **Crew.** A scenario names its technicians, their skills and travel time. A job nobody on the crew can do waits 48 h for a contractor. Arriving later than the priority's response target is an SLA breach.
 - **Ending.** At day 60 or on `finish()`, the final `step()` observation carries `reward` = score and `metadata.result`, which has costs, failure prevented, false dispatches, detection delay and the KPIs.
@@ -104,7 +104,10 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 | `server/ledger.py`, `server/report.py` | cost ledger; state, KPIs and result |
 | `server/scenarios.py` | variants, reference runs, score |
 | `server/aob.py` | per-episode CouchDB databases and the stdio bridge to the AssetOpsBench servers |
-| `server/environment.py` | the OpenEnv `MCPEnvironment`: tools, clock, CouchDB mirroring, wall-clock fixes, reward |
+| `server/environment.py` | the OpenEnv `MCPEnvironment`: tools, clock, reward, `latest_reading`'s age |
+| `server/tools.py` | the tool list (`openenv.yaml`), GymError → ErrorResult, AssetOpsBench tools re-exposed, the WO write signatures |
+| `server/mirror.py` | CouchDB as a mirror: asset and failure-code catalogs, telemetry rows, WO documents folded from the events |
+| `server/prompt.py` | the agent's instruction |
 | `server/app.py`, `client.py`, `openenv.yaml` | OpenEnv packaging |
 | `baselines.py`, `tests/` | reference policies, anchors, integration tests |
 | `agent.py` | zero-shot agent over any OpenAI-compatible endpoint (TokenRouter, vLLM) |
@@ -116,9 +119,9 @@ Each line names its owner task on the team board.
 - **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise (`analysis/chiller6.md`), and Dhaval's MATLAB failure-mode list replaces our three modes.
 - **Alerts run in the gym's process**, not a separate MCP server. Acknowledge and shelve are free until T2 prices them; no chatter-rate knob yet (T7, d07).
 - **Cost priors are flat guesses**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
-- **Work-order edits** after the technician arrives are ignored. A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
+- **Work-order edits** after the technician arrives are refused (`WORK_ORDER_LOCKED`). A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
 - **Each environment instance starts its own IoT and WO server processes** (about 10 s). The AssetOpsBench servers read their database names from the environment at start, so sharing one server pair across episodes needs a change upstream (T4, T11).
-- **Wall-clock audit (T4).** Of the tools the gym exposes, only `generate_work_order` (reportdate), `cancel_workorder` (status_date) and `latest_reading` (age) read the real clock, and all three are rewritten to simulated time. The other clock readers in the WO server (`approve_workorder`, `assign_technician`, `close_workorder`, KPIs, calendar) are deliberately not exposed: the planner and technicians are simulated.
+- **Wall-clock audit (T4).** The gym writes work orders itself, in simulated time. Of the AssetOpsBench tools it exposes, only `latest_reading` (age) reads the real clock, and the gym rewrites it to simulated time. The other clock readers in the WO server (KPIs, calendar) are deliberately not exposed; its writes are hidden by `AOB_READONLY=1`.
 - **No Docker image yet.** It needs CouchDB and AssetOpsBench beside the gym (T11).
 - **The agent keeps the whole conversation**, so prompt tokens grow quadratically with turns (T9). The profile's `llm.chat` spans carry `messages` and `prompt_tokens` per turn, so the curve is in the data.
 - **No "before" number yet.** Last year's Plan-Execute profiling run is the baseline the report compares against; it has not been re-run on this gym (T10).
