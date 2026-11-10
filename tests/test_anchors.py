@@ -59,3 +59,10 @@ def test_deterministic():
     v = VARIANTS["refleak_mid"]
     assert Sim(v).history == Sim(v).history
     assert run(v, oracle) == run(v, oracle)
+
+
+def test_unseeded_reset_is_replayable():
+    from assetopsgym.server.environment import pick_variant
+    v = pick_variant(None, None)
+    assert pick_variant(None, v.seed) == v
+    assert pick_variant("healthy", None) == VARIANTS["healthy"]

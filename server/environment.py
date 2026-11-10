@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import random
+import secrets
 import threading
 import uuid
 from dataclasses import replace
@@ -60,9 +60,24 @@ When you are done, call finish; the rest of the {days} days is then simulated wi
 
 class GymState(State):
     variant: str = ""
+    seed: int = 0  # replays the run: reset(variant, seed)
     sim_time: str = ""
     finished: bool = False
     score: Optional[float] = None
+
+
+def pick_variant(variant: Optional[str],
+                 seed: Optional[int]) -> Variant:
+    """Neither given: a seed from the OS, then as if given."""
+    if variant is None and seed is None:
+        seed = secrets.randbelow(2**31)
+    if variant is None:
+        ids = sorted(VARIANTS)
+        variant = ids[seed % len(ids)]
+    v = VARIANTS[variant]
+    if seed is None:
+        return v
+    return replace(v, seed=seed)  # also keys the reference_costs cache
 
 
 def _wo_time(t: datetime) -> str:
@@ -105,9 +120,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         # event loop (other sessions keep stepping); the lock keeps this episode's simulator
         # single-threaded.
         @mcp.tool
-        def current_time() -> dict:
+        async def current_time() -> dict:
             """Current simulated time and the end of your shift (ISO 8601, UTC)."""
-            return env._clock()
+            return await asyncio.to_thread(env._locked, env._clock)
 
         @mcp.tool
         async def advance_time(hours: float) -> dict:
@@ -117,7 +132,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return await asyncio.to_thread(env._locked, env._advance, hours)
 
         @mcp.tool
-        def list_alerts(since: Optional[str] = None,
+        async def list_alerts(since: Optional[str] = None,
                         kind: Optional[str] = None, limit: int = 50,
                         unacked_only: bool = False) -> dict:
             """Building-management alerts raised so far, oldest
@@ -129,7 +144,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 limit: maximum alerts returned, newest kept (1-200).
                 unacked_only: only alerts not yet acknowledged.
             """
-            return env._alerts(since, kind, limit, unacked_only)
+            return await asyncio.to_thread(
+                env._locked, env._alerts, since, kind, limit,
+                unacked_only)
 
         @mcp.tool
         async def acknowledge_alert(alert_id: str) -> dict:
@@ -172,12 +189,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
     # ---- OpenEnv API ------------------------------------------------------
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None,
               variant: Optional[str] = None, **kwargs: Any) -> Observation:
-        if variant is None:
-            ids = sorted(VARIANTS)
-            variant = ids[seed % len(ids)] if seed is not None else random.choice(ids)
-        v = VARIANTS[variant]
-        if seed is not None:
-            v = replace(v, seed=seed)  # also keys the reference_costs cache
+        v = pick_variant(variant, seed)
         episode_id = episode_id or str(uuid.uuid4())
         boot = self.prof.total("env.boot")
         self.prof.reset(episode_id)
@@ -195,14 +207,17 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 self._write_rows(self.sim.history)
             with self.prof.span("sim.reference_runs"):
                 reference_costs(v)  # warm the score's reference runs now, not at the last step
-        self._state = GymState(episode_id=episode_id, step_count=0, variant=v.id, sim_time=iso(self.sim.now))
+        self._state = GymState(
+            episode_id=episode_id, step_count=0, variant=v.id,
+            seed=v.seed, sim_time=iso(self.sim.now))
         text = INSTRUCTION.format(site=SITE, asset=ASSET, now=iso(self.sim.now), end=iso(v.end),
                                   days=v.horizon_days, max_h=MAX_ADVANCE_H,
                                   max_shelve=MAX_SHELVE_H,
                                   history_start=iso(v.start - timedelta(days=v.history_days)))
         return Observation(done=False, reward=0.0, metadata={
             "instruction": text, "site": SITE, "asset": ASSET, "episode_id": episode_id,
-            "sim_time": iso(self.sim.now), "shift_end": iso(v.end)})
+            "seed": v.seed, "sim_time": iso(self.sim.now),
+            "shift_end": iso(v.end)})
 
     # Rewards and termination only flow through step(), OpenEnv's simulation path;
     # direct /mcp calls reach the same tools without them.
@@ -418,8 +433,11 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         self._state.sim_time = iso(self.sim.now)
 
     def _finalize(self, obs: Observation) -> Observation:
-        if self.sim is not None and self._result is None and self._state.step_count >= self.max_steps:
-            self._end("step limit")
+        # _end expects the lock held (it runs inside locked tools)
+        with self._lock:
+            if (self.sim is not None and self._result is None
+                    and self._state.step_count >= self.max_steps):
+                self._end("step limit")
         if self._result is not None:
             if "profile" not in self._result:  # first observation after the end: fold and emit once
                 self._result["profile"] = self.prof.emit(side="server", episode_id=self._state.episode_id,

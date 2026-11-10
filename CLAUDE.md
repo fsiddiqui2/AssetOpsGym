@@ -12,6 +12,7 @@ servers and is scored over a 60-day window.
 - `server/scenarios.py`: variants and the score.
 - `infra/`: GPU + vLLM for the agent. `gcp.sh` (your own
   gcloud project), `insomnia.sbatch`; both run `serve.sh`.
+  vLLM listens on :8001, the gym on :8000.
 - `schemas.py`: the team's interface contract (T2/T4/T7/T8
   all write to it). Change it deliberately, not in passing.
 
