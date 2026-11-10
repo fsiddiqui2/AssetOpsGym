@@ -1,11 +1,14 @@
-"""The cost ledger: totals, downtime spans, daily excess-energy sums."""
+"""The event ledger: the only record of a run. Costs, downtime and
+KPIs are folds over it; fetch() serves it as JSON."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
+from typing import get_args
 
-from ..schemas import CostEvent, DowntimeEvent, LedgerEvent
+from ..schemas import CostEvent, CostKind, DowntimeEvent, LedgerEvent
 from .variant import TICK_H
 
 # Cost model in USD. ponytail: flat priors; sweep them once the scenario
@@ -18,16 +21,10 @@ ENERGY_PRICE_PER_KWH = 0.15
 
 @dataclass
 class Ledger:
-    """Totals drive the score; the event ledger (schemas.LedgerEvent) is
-    the audit trail and the five KPIs are folds over it. Downtime and
-    excess energy are emitted as spans and daily sums, so the ledger stays
-    a few hundred events, not one per tick."""
+    """Downtime and excess energy are emitted as spans and daily sums,
+    so the ledger stays a few hundred events, not one per tick. The
+    other fields are only the open span and day being accumulated."""
     energy_day: date
-    cost: dict[str, float] = field(default_factory=lambda: {
-        "dispatch": 0.0, "repair": 0.0, "planned_downtime": 0.0,
-        "unplanned_downtime": 0.0, "excess_energy": 0.0})
-    hours: dict[str, float] = field(default_factory=lambda: {
-        "planned_downtime": 0.0, "unplanned_downtime": 0.0})
     events: list[LedgerEvent] = field(default_factory=list)
     # (planned|unplanned, span start)
     down: tuple[str, datetime] | None = None
@@ -42,10 +39,6 @@ def downtime(l: Ledger, t: datetime, failed: bool,
         _close_downtime(l, t)
     if kind and not l.down:
         l.down = (kind, t)
-    if failed:
-        _charge(l, "unplanned_downtime", UNPLANNED_DOWNTIME_PER_H)
-    elif repairing:
-        _charge(l, "planned_downtime", PLANNED_DOWNTIME_PER_H)
 
 
 def energy(l: Ledger, t: datetime, running: bool,
@@ -53,9 +46,7 @@ def energy(l: Ledger, t: datetime, running: bool,
     if t.date() != l.energy_day:
         _flush_energy(l, t)
     if running:
-        e = excess_kw * TICK_H * ENERGY_PRICE_PER_KWH
-        l.cost["excess_energy"] += e
-        l.energy_acc += e
+        l.energy_acc += excess_kw * TICK_H * ENERGY_PRICE_PER_KWH
 
 
 def close(l: Ledger, t: datetime) -> None:
@@ -64,9 +55,32 @@ def close(l: Ledger, t: datetime) -> None:
     _flush_energy(l, t)
 
 
-def _charge(l: Ledger, kind: str, per_hour: float) -> None:
-    l.cost[kind] += per_hour * TICK_H
-    l.hours[kind] += TICK_H
+def costs(events: list[LedgerEvent]) -> dict[CostKind, float]:
+    """USD by kind, every kind present. Complete once closed."""
+    out = dict.fromkeys(get_args(CostKind), 0.0)
+    for e in events:
+        if isinstance(e, CostEvent):
+            out[e.kind] += e.amount
+    return out
+
+
+def downtime_hours(events: list[LedgerEvent]) -> dict[str, float]:
+    out = {"planned_downtime": 0.0, "unplanned_downtime": 0.0}
+    for e in events:
+        if isinstance(e, DowntimeEvent):
+            out[f"{e.kind}_downtime"] += e.hours
+    return out
+
+
+def fetch(events: list[LedgerEvent], since: int,
+          types: tuple[type, ...] | None
+          ) -> tuple[list[dict], int]:
+    """Events from index `since` on, as JSON-ready dicts, and the
+    cursor to pass next time."""
+    picked = [asdict(e) for e in events[since:]
+              if types is None or isinstance(e, types)]
+    return (json.loads(json.dumps(picked, default=datetime.isoformat)),
+            len(events))
 
 
 def _close_downtime(l: Ledger, t: datetime) -> None:

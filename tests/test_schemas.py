@@ -11,6 +11,7 @@ from assetopsgym.schemas import (AlertEvent, CostEvent, ErrorCode,
                                  ErrorResult, GymError)
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
 from assetopsgym.server.faults import FAULT_MODES
+from assetopsgym.server.ledger import fetch
 from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
 from assetopsgym.server.sim import Sim
 from assetopsgym.server.variant import Technician, Variant, from_dict
@@ -51,16 +52,16 @@ def test_result_state_and_events_validate(vid):
     assert raised == [a.id for a in sim.alerts]
     with pytest.raises(ValueError):
         replace(r, cost_total=r.cost_total + 1)
-    # Every dollar in the score has a cost event behind it, by kind.
-    by_kind = {}
-    for e in sim.events:
-        if isinstance(e, CostEvent):
-            by_kind[e.kind] = by_kind.get(e.kind, 0.0) + e.amount
-    for kind, total in sim.ledger.items():
-        assert abs(by_kind.get(kind, 0.0) - total) < 0.01, kind
-    # Downtime spans account for the downtime hours.
+    # The score's totals are folds over the events.
+    paid = sum(e.amount for e in sim.events if isinstance(e, CostEvent))
+    assert abs(paid - r.cost_total) < 0.01
     spans = sum(e.hours for e in sim.events if e.type == "downtime")
-    assert abs(spans - sum(sim.hours.values())) < 1e-6
+    assert abs(spans - sum(r.downtime_hours.values())) < 1e-6
+    rows, cursor = fetch(sim.events, 0, (CostEvent,))
+    assert cursor == len(sim.events) and rows
+    assert {x["type"] for x in rows} == {"cost"}
+    assert json.loads(json.dumps(rows)) == rows
+    assert fetch(sim.events, cursor, None) == ([], cursor)
 
 
 def test_tool_check_is_loud():

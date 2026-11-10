@@ -33,10 +33,7 @@ class Sim:
     # flat views read by the environment, baselines and tests
     alerts = property(lambda s: s.bms.alerts)
     wos = property(lambda s: s.maint.wos)
-    changes = property(lambda s: s.maint.changes)
     events = property(lambda s: s.book.events)
-    ledger = property(lambda s: s.book.cost)
-    hours = property(lambda s: s.book.hours)
     ever_failed = property(lambda s: s.fault.ever_failed)
     failed_at = property(lambda s: s.fault.failed_at)
     done = property(lambda s: s.now >= s.v.end)
@@ -60,11 +57,33 @@ class Sim:
         return maintenance.file_wo(self.maint, self.book, self.v,
                                    self.now, code, priority, wonum)
 
-    def update_wo(self, wonum: str, code: str | None = None,
-                  priority: int | None = None,
-                  cancel: bool = False) -> None:
-        maintenance.update_wo(self.maint, self.book, self.v, self.now,
-                              wonum, code, priority, cancel)
+    def generate_work_order(
+            self, description: str, asset_num: str, site_id: str,
+            priority: int = 3, work_type: str = "CM",
+            reported_by: str | None = None,
+            location: str | None = None, notes: str | None = None,
+            wonum: str | None = None) -> maintenance.WorkOrder:
+        return maintenance.generate_work_order(
+            self.maint, self.book, self.v, self.now, description,
+            asset_num, site_id, priority, work_type, reported_by,
+            location, notes, wonum)
+
+    def update_workorder(
+            self, wonum: str, site_id: str,
+            description: str | None = None,
+            priority: int | None = None, location: str | None = None,
+            asset_num: str | None = None, notes: str | None = None,
+            failure_code: str | None = None) -> maintenance.WorkOrder:
+        return maintenance.update_workorder(
+            self.maint, self.book, self.v, self.now, wonum, site_id,
+            description, priority, location, asset_num, notes,
+            failure_code)
+
+    def cancel_workorder(self, wonum: str, site_id: str,
+                         reason: str | None = None
+                         ) -> maintenance.WorkOrder:
+        return maintenance.cancel_workorder(
+            self.maint, self.book, self.now, wonum, site_id, reason)
 
     def acknowledge(self, alert_id: str) -> alerts.Alert:
         return alerts.acknowledge(self.bms, self.events, self.now,
@@ -97,7 +116,7 @@ class Sim:
 
     def _tick(self, t: datetime) -> TelemetryRow:
         f, events = self.fault, self.events
-        maintenance.service(self.maint, self.book, f, self.v, t)
+        maintenance.run_due(self.maint, self.book, f, self.v, t)
         s = faults.severity(f, t)
         if not f.failed and s >= 1.0:
             faults.trip(f, events, t)

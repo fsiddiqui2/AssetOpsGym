@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
 from assetopsgym.server.faults import FAULT_MODES
+from assetopsgym.server.maintenance import status
 from assetopsgym.server.sim import Sim
 
 RULE_CODE = {
@@ -20,7 +21,8 @@ RULE_CODE = {
 
 
 def _open_codes(sim: Sim) -> set:
-    return {w.code for w in sim.wos.values() if w.status in ("WAPPR", "APPR", "INPRG")}
+    return {w.code for w in sim.wos.values()
+            if status(w) in ("WAPPR", "APPR", "INPRG")}
 
 
 def threshold_on_delay(sim: Sim, check_hours: float = 24) -> None:
