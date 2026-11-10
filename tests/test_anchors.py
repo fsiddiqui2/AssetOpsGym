@@ -4,6 +4,8 @@
     healthy: do nothing (the reference there) >= 0.95, every shortcut <= 0.8
 """
 
+from dataclasses import replace
+
 import pytest
 
 from assetopsgym.baselines import SHORTCUTS
@@ -39,6 +41,18 @@ def test_faults_reach_an_operator_alarm_before_failing():
         sim.run_to_end()
         alarms = [a for a in sim.alerts if a.kind == "operator_alarm" and a.rule != "chiller_trip"]
         assert alarms and alarms[0].time < sim.failed_at, v.id
+
+
+@pytest.mark.parametrize("vid", sorted(VARIANTS))
+def test_reset_seed_varies_the_run_and_keeps_the_anchors(vid):
+    runs = [replace(VARIANTS[vid], seed=s) for s in (0, 1, 2)]
+    assert len({tuple(map(str, Sim(v).history[:96])) for v in runs}) == 3
+    for v in runs:
+        nothing = score(v, run(v, do_nothing)["cost_total"])
+        if v.mode:
+            assert nothing == 0.0 and score(v, run(v, oracle)["cost_total"]) >= 0.95
+        else:
+            assert nothing >= 0.95
 
 
 def test_deterministic():

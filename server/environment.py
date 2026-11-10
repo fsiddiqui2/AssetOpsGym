@@ -19,6 +19,7 @@ import json
 import random
 import threading
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -154,6 +155,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             ids = sorted(VARIANTS)
             variant = ids[seed % len(ids)] if seed is not None else random.choice(ids)
         v = VARIANTS[variant]
+        if seed is not None:
+            v = replace(v, seed=seed)  # also keys the reference_costs cache
         episode_id = episode_id or str(uuid.uuid4())
         boot = self.prof.total("env.boot")
         self.prof.reset(episode_id)
@@ -361,7 +364,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             before = self.sim.now
             with self.prof.span("sim.run_to_end") as sp:
                 self.sim.run_to_end()  # ponytail: rows after an early finish are not written; nobody can read them
-                sp.set(sim_hours=(self.sim.now - before).total_seconds() / 3600)
+                sp.set(sim_hours_skipped=(self.sim.now - before)
+                       .total_seconds() / 3600)
             self.sim.changes.clear()
             r = self.sim.result()
             reactive, best = reference_costs(self.sim.v)

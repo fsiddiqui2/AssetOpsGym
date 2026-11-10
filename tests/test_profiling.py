@@ -32,6 +32,16 @@ def test_spans_nest_per_thread_and_fold_by_name():
     json.dumps(s)  # serializable as is
 
 
+
+def test_finish_fast_forward_is_not_simulated_time():
+    p = Profiler()
+    with p.span("sim.advance", sim_hours=24):
+        pass
+    with p.span("sim.run_to_end", sim_hours_skipped=1416):
+        pass
+    d = p.summary()["derived"]
+    assert d["sim_hours"] == 24 and d["sim_hours_skipped"] == 1416
+
 def test_agent_side_derived_metrics():
     p = Profiler()
     for hours in (24, 48, 96):

@@ -96,7 +96,9 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
         step = call_tool(env, prof, "finish", {})
     result = step.observation.metadata.get("result", {})
     profile = prof.emit(side="agent", variant=result.get("variant"), model=model, score=step.reward,
-                        end_reason=result.get("end_reason"))
+                        end_reason=result.get("end_reason"),
+                        episode_id=prof.episode_id,
+                        server=(result.get("profile") or {}).get("derived"))
     d = profile["derived"]
     return {"variant": result.get("variant"), "model": model, "score": step.reward,
             "failure_prevented": result.get("failure_prevented"), "false_dispatches": result.get("false_dispatches"),

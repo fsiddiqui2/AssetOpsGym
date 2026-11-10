@@ -28,6 +28,7 @@ Span names are dotted; the first segment is the stage. The ones the code emits:
     env.reset   env.step   env.end          server side, per OpenEnv call
     tool.<name>                             the gym's own tool bodies (advance_time, ...)
     sim.advance                             the pure simulator (attrs: sim_hours, rows)
+    sim.run_to_end                          finish()'s fast-forward (attrs: sim_hours_skipped)
     couch.write_rows  couch.sync_wo  couch.flush_wo
     mcp.aob                                 a proxied AssetOpsBench call (attrs: server, tool)
     llm.chat                                agent side (attrs: prompt_tokens, completion_tokens)
@@ -175,6 +176,8 @@ class Profiler:
             "sim_s": round(tot("sim"), 3), "couch_s": round(tot("couch"), 3), "aob_s": round(tot("mcp"), 3),
             "llm_fraction": round(llm_s / (llm_s + env_s), 3) if llm_s + env_s else None,
             "sim_hours": round(sim_hours, 2),
+            # fast-forwarded by finish(); no agent turns spent on it
+            "sim_hours_skipped": round(asum("sim_hours_skipped"), 2),
             "sim_hours_per_wall_s": round(sim_hours / wall, 3) if wall else None,
             "llm_calls": sum(1 for s in spans if s.name.startswith("llm.")),
             "tool_calls": sum(1 for s in spans if s.name in ("client.step", "env.step")),
