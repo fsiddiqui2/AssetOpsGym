@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 agent = ["openai>=1.40.0"]
+profile = ["wandb>=0.18.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

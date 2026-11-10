@@ -73,11 +73,24 @@ with AssetOpsGymEnv(base_url="http://localhost:8000").sync() as env:
 
 Rewards only flow through `step()`, which is OpenEnv's simulation path. `list_tools`/`call_tool` on the client use the direct `/mcp` route: same tools, no reward.
 
+## Profiling (T10)
+
+Every stage of a rollout is timed, always, by `profiling.Profiler`: the environment step, each gym tool, the pure simulator, the CouchDB writes, each proxied AssetOpsBench call, and on the agent side each LLM request. The last observation of an episode carries the server-side fold in `metadata.result.profile`; the agent prints its own fold next to it. Both report wall seconds per stage with p50/p95, the LLM vs environment split, simulated hours per wall second, and tokens per simulated hour.
+
+```bash
+AOG_PROFILE_DIR=runs uv run server                  # one JSON line per episode in runs/profile.jsonl
+WANDB_PROJECT=assetopsgym uv run python -m assetopsgym.agent --variant refleak_mid   # same, logged to W&B
+uv sync --extra profile                             # wandb
+```
+
+Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are dotted and the first segment groups them (`env`, `tool`, `sim`, `couch`, `mcp`, `llm`, `client`). `profiling.GPUSampler` polls nvidia-smi for utilization and memory on the serving host. For the inference side, run the vLLM server under `nsys profile -t cuda,nvtx -o vllm` and read the PyTorch Profiler trace vLLM writes when started with `VLLM_TORCH_PROFILER_DIR`; W&B's system metrics cover GPU utilization when the run lives on the GPU host.
+
 ## Layout
 
 | file | what |
 |---|---|
 | `schemas.py` | the four team interfaces as pydantic models: scenario, simulator API, ledger events, agent tool list (draft; `tests/test_schemas.py` keeps them honest against the code) |
+| `profiling.py` | span timing for every rollout stage, the per-episode fold (LLM/env split, tokens per simulated hour), JSONL and W&B sinks, GPU sampler |
 | `server/sim.py` | chiller physics-lite, faults, blips, BMS rules, planner and technicians, cost ledger (pure, deterministic) |
 | `server/scenarios.py` | variants, reference runs, score |
 | `server/aob.py` | per-episode CouchDB databases and the stdio bridge to the AssetOpsBench servers |
@@ -97,4 +110,5 @@ Each line names its owner task on the team board.
 - **Each environment instance starts its own IoT and WO server processes** (about 10 s). The AssetOpsBench servers read their database names from the environment at start, so sharing one server pair across episodes needs a change upstream (T4, T11).
 - **Wall-clock audit (T4).** Of the tools the gym exposes, only `generate_work_order` (reportdate), `cancel_workorder` (status_date) and `latest_reading` (age) read the real clock, and all three are rewritten to simulated time. The other clock readers in the WO server (`approve_workorder`, `assign_technician`, `close_workorder`, KPIs, calendar) are deliberately not exposed: the planner and technicians are simulated.
 - **No Docker image yet.** It needs CouchDB and AssetOpsBench beside the gym (T11).
-- **The agent keeps the whole conversation**, so prompt tokens grow quadratically with turns (T9, T10).
+- **The agent keeps the whole conversation**, so prompt tokens grow quadratically with turns (T9). The profile's `llm.chat` spans carry `messages` and `prompt_tokens` per turn, so the curve is in the data.
+- **No "before" number yet.** Last year's Plan-Execute profiling run is the baseline the report compares against; it has not been re-run on this gym (T10).

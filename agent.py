@@ -6,18 +6,21 @@
 
 Point OPENAI_BASE_URL at a vLLM server to run a local model. Every tool call goes
 through env.step(), so the final observation carries the reward. Prints a JSON
-summary with the score and the wall-time split between the LLM and the environment.
+summary with the score, the agent-side profile (LLM vs environment wall time,
+tokens per simulated hour) and the server-side profile the environment attaches
+to its last observation. Set AOG_PROFILE_DIR or WANDB_PROJECT to keep them
+(see assetopsgym.profiling).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import time
 
 from openai import OpenAI
 
 from assetopsgym import AssetOpsGymEnv, CallToolAction
+from assetopsgym.profiling import Profiler
 
 MAX_TOOL_CHARS = 6000
 GUIDE = ("Work like an engineer on shift: check the data, decide how far to advance time, and act on evidence. "
@@ -36,23 +39,40 @@ def _content(obs) -> str:
     return text
 
 
-def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: int) -> dict:
-    reset = env.reset(variant=variant)
+def _sim_hours(obs) -> float:
+    """Simulated hours an advance_time call actually moved, from its own result."""
+    if obs.error is not None:
+        return 0.0
+    result = obs.result
+    data = result.get("data") if isinstance(result, dict) else getattr(result, "data", result)
+    return float(data.get("sim_hours_advanced", 0.0)) if isinstance(data, dict) else 0.0
+
+
+def call_tool(env, prof: Profiler, name: str, args: dict):
+    with prof.span("client.step", tool=name) as sp:
+        step = env.step(CallToolAction(tool_name=name, arguments=args))
+        if name == "advance_time":
+            sp.set(sim_hours=_sim_hours(step.observation))
+    return step
+
+
+def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: int,
+                prof: Profiler | None = None) -> dict:
+    prof = prof or Profiler()
+    with prof.span("client.reset"):
+        reset = env.reset(variant=variant)
+    prof.episode_id = reset.observation.metadata.get("episode_id")
     tools = [{"type": "function", "function": {"name": t.name, "description": t.description[:1000],
                                                "parameters": t.input_schema or {"type": "object", "properties": {}}}}
              for t in env.list_tools()]
     messages = [{"role": "system", "content": reset.observation.metadata["instruction"] + "\n\n" + GUIDE},
                 {"role": "user", "content": "Your shift starts now."}]
-    t_llm = t_env = 0.0
-    tokens = {"prompt": 0, "completion": 0}
-    calls, nudges, step = 0, 0, None
-    for _ in range(max_turns):
-        t = time.perf_counter()
-        resp = llm.chat.completions.create(model=model, messages=messages, tools=tools)
-        t_llm += time.perf_counter() - t
-        if resp.usage:
-            tokens["prompt"] += resp.usage.prompt_tokens
-            tokens["completion"] += resp.usage.completion_tokens
+    nudges, step = 0, None
+    for turn in range(max_turns):
+        with prof.span("llm.chat", turn=turn, messages=len(messages)) as sp:
+            resp = llm.chat.completions.create(model=model, messages=messages, tools=tools)
+            if resp.usage:
+                sp.set(prompt_tokens=resp.usage.prompt_tokens, completion_tokens=resp.usage.completion_tokens)
         msg = resp.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
         if not msg.tool_calls:
@@ -66,25 +86,26 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
                 args = json.loads(tc.function.arguments or "{}")
             except ValueError:
                 args = {}
-            t = time.perf_counter()
-            step = env.step(CallToolAction(tool_name=tc.function.name, arguments=args))
-            t_env += time.perf_counter() - t
-            calls += 1
+            step = call_tool(env, prof, tc.function.name, args)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": _content(step.observation)})
             if step.done:
                 break
         if step is not None and step.done:
             break
     if step is None or not step.done:  # out of turns: score the state reached, as FDE-Gym does
-        t = time.perf_counter()
-        step = env.step(CallToolAction(tool_name="finish", arguments={}))
-        t_env += time.perf_counter() - t
+        step = call_tool(env, prof, "finish", {})
     result = step.observation.metadata.get("result", {})
+    profile = prof.emit(side="agent", variant=result.get("variant"), model=model, score=step.reward,
+                        end_reason=result.get("end_reason"))
+    d = profile["derived"]
     return {"variant": result.get("variant"), "model": model, "score": step.reward,
             "failure_prevented": result.get("failure_prevented"), "false_dispatches": result.get("false_dispatches"),
             "detection_delay_hours": result.get("detection_delay_hours"), "cost_total": result.get("cost_total"),
-            "end_reason": result.get("end_reason"), "tool_calls": calls, "tokens": tokens,
-            "seconds": {"llm": round(t_llm, 1), "env": round(t_env, 1)}}
+            "end_reason": result.get("end_reason"), "tool_calls": d["tool_calls"],
+            "tokens": {"prompt": d["prompt_tokens"], "completion": d["completion_tokens"]},
+            "seconds": {"llm": round(d["llm_s"], 1), "env": round(d["env_s"], 1)},
+            "tokens_per_sim_hour": d["tokens_per_sim_hour"], "sim_hours_per_wall_s": d["sim_hours_per_wall_s"],
+            "profile": profile, "server_profile": result.get("profile")}
 
 
 def main():
