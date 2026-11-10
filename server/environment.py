@@ -40,9 +40,10 @@ from openenv.core.env_server.types import Action, Observation, State
 
 from ..profiling import Profiler
 from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
-                       ClockResult, ErrorCode, ErrorResult,
-                       FinishResult, GymError, ListAlertsResult,
-                       ShelveResult, WorkOrderUpdate)
+                       ClockResult, EpisodeResult, ErrorCode,
+                       ErrorResult, FinishResult, GymError,
+                       ListAlertsResult, ShelveResult, TelemetryRow,
+                       WorkOrderUpdate)
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
 from .alerts import MAX_SHELVE_H
@@ -238,7 +239,8 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                                               forward=self._call_proxied))
         check_tools([*own, *self.proxied], MANIFEST.tools)
         self.sim: Sim | None = None
-        self._result: dict | None = None
+        self._result: EpisodeResult | None = None
+        self._profile: dict | None = None
         self._state = GymState(episode_id=str(uuid.uuid4()))
 
     # ---- OpenEnv API ------------------------------------------------------
@@ -252,7 +254,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         with self.prof.span("env.reset", variant=v.id):
             with self.prof.span("sim.history"):
                 self.sim = Sim(v)
-            self._result = None
+            self._result, self._profile = None, None
             with self.prof.span("couch.recreate"):
                 self.couch.recreate()
                 self.couch.bulk("asset", [_asset_doc()])
@@ -386,7 +388,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 self._end("agent finished")
         return FinishResult(
             message="Shift ended; the remaining time was simulated.",
-            score=self._result["score"])
+            score=self._result.score)
 
     # ---- plumbing ---------------------------------------------------------
     def _locked(self, fn, *args):
@@ -484,9 +486,10 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         self.sim.changes.clear()
         return updates
 
-    def _write_rows(self, rows: list[dict]) -> None:
-        self.couch.bulk("iot", [{"_id": f"iot:{ASSET}:{r['timestamp']}", "asset_id": ASSET,
-                                 "timestamp": r["timestamp"], **r["values"]} for r in rows])
+    def _write_rows(self, rows: list[TelemetryRow]) -> None:
+        self.couch.bulk("iot", [
+            {"_id": f"iot:{ASSET}:{iso(r.timestamp)}", "asset_id": ASSET,
+             "timestamp": iso(r.timestamp), **r.values} for r in rows])
 
     def _end(self, reason: str) -> None:
         with self.prof.span("env.end", reason=reason):
@@ -500,10 +503,12 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             self.sim.changes.clear()
             r = self.sim.result()
             reactive, best = reference_costs(self.sim.v)
-            r.update(score=score(self.sim.v, r["cost_total"]), end_reason=reason,
-                     reference_costs={"reactive_practice": reactive, "oracle": best})
+            r = replace(r, score=score(self.sim.v, r.cost_total),
+                        end_reason=reason, reference_costs={
+                            "reactive_practice": reactive,
+                            "oracle": best})
         self._result = r
-        self._state.finished, self._state.score = True, r["score"]
+        self._state.finished, self._state.score = True, r.score
         self._state.sim_time = iso(self.sim.now)
 
     def _finalize(self, obs: Observation) -> Observation:
@@ -512,13 +517,16 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             if (self.sim is not None and self._result is None
                     and self._state.step_count >= self.max_steps):
                 self._end("step limit")
-        if self._result is not None:
-            if "profile" not in self._result:  # first observation after the end: fold and emit once
-                self._result["profile"] = self.prof.emit(side="server", episode_id=self._state.episode_id,
-                                                         steps=self._state.step_count, score=self._result["score"],
-                                                         end_reason=self._result["end_reason"])
-            obs.done, obs.reward = True, self._result["score"]
-            obs.metadata = {**obs.metadata, "result": self._result}
+        r = self._result
+        if r is not None:
+            if self._profile is None:  # first observation after the end
+                self._profile = self.prof.emit(
+                    side="server", episode_id=self._state.episode_id,
+                    steps=self._state.step_count, score=r.score,
+                    end_reason=r.end_reason)
+            obs.done, obs.reward = True, r.score
+            obs.metadata = {**obs.metadata, "result": {
+                **to_jsonable_python(r), "profile": self._profile}}
         return obs
 
 

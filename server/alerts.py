@@ -14,11 +14,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable
 
-from ..schemas import AlertActionEvent, AlertEvent, LedgerEvent
+from ..schemas import (AlertActionEvent, AlertEvent, LedgerEvent,
+                       PublicAlert)
 from .telemetry import (ASSET, CAPACITY_TONS, DESIGN_FLOW_GPM, EFFICIENCY,
                         FLOW, LOADED, POWER, REFRIG, SETPOINT, SITE, SUPPLY,
                         TONNAGE)
-from .variant import TICK_H, iso
+from .variant import TICK_H
 
 ANALYTICS_COOLDOWN = timedelta(hours=6)
 Z_WINDOW_TICKS = 96
@@ -75,11 +76,10 @@ class Alert:
     shelved: bool = False  # raised while its rule was shelved: hidden
     acked_at: datetime | None = None
 
-    def public(self) -> dict:
-        return {"id": self.id, "time": iso(self.time), "kind": self.kind,
-                "rule": self.rule, "site": SITE, "asset": ASSET,
-                "sensor": self.sensor, "value": round(self.value, 3),
-                "message": self.message, "acked": self.acked_at is not None}
+    def public(self) -> PublicAlert:
+        return PublicAlert(self.id, self.time, self.kind, self.rule, SITE,
+                           ASSET, self.sensor, round(self.value, 3),
+                           self.message, self.acked_at is not None)
 
 
 @dataclass

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from ..schemas import EpisodeResult
 from .maintenance import DISPATCH_COST
 from .sim import Sim
 from .variant import Variant
@@ -48,7 +49,7 @@ def oracle(sim: Sim) -> None:
     sim.run_to_end()
 
 
-def run(variant: Variant, policy) -> dict:
+def run(variant: Variant, policy) -> EpisodeResult:
     sim = Sim(variant)
     policy(sim)
     return sim.result()
@@ -56,7 +57,8 @@ def run(variant: Variant, policy) -> dict:
 
 @lru_cache(maxsize=None)
 def reference_costs(variant: Variant) -> tuple[float, float]:
-    return run(variant, do_nothing)["cost_total"], run(variant, oracle)["cost_total"]
+    return (run(variant, do_nothing).cost_total,
+            run(variant, oracle).cost_total)
 
 
 def score(variant: Variant, cost: float) -> float:

@@ -72,7 +72,7 @@ def test_acknowledge_once():
     sim.acknowledge(a.id)
     sim.advance(1)
     sim.acknowledge(a.id)
-    assert a.acked_at is not None and a.public()["acked"]
+    assert a.acked_at is not None and a.public().acked
     acks = [e for e in sim.events if isinstance(e, AlertActionEvent)]
     assert [(e.action, e.alert_id) for e in acks] == [("ack", a.id)]
     with pytest.raises(KeyError):

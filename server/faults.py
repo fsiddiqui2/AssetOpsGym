@@ -38,6 +38,7 @@ class Fault:
     mode: str | None
     onset: datetime | None
     pf_days: float
+    exponent: float
     active: bool
     failed: bool = False
     ever_failed: bool = False
@@ -48,7 +49,8 @@ def severity(f: Fault, t: datetime) -> float:
     onset = f.onset
     if not f.active or onset is None or t < onset:
         return 0.0
-    return min(1.0, ((t - onset) / timedelta(days=f.pf_days)) ** 1.6)
+    return min(1.0, ((t - onset) / timedelta(days=f.pf_days))
+               ** f.exponent)
 
 
 def inject_fault(f: Fault, mode: str, onset: datetime,

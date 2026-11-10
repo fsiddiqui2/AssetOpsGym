@@ -1,28 +1,39 @@
-"""The four interface schemas round-trip what the code produces today, and the ledger
-is a complete account of the score."""
+"""The interface schemas hold what the code produces today, a variant loads
+from a table row, and the ledger is a complete account of the score."""
 
-from datetime import timedelta
+import json
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta
 
 import pytest
 
-from assetopsgym.schemas import (AlertEvent, CostEvent, EpisodeResult, Scenario, SimState,
-                                 Technician, ErrorCode, ErrorResult,
-                                 GymError)
+from assetopsgym.schemas import (AlertEvent, CostEvent, ErrorCode,
+                                 ErrorResult, GymError)
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
 from assetopsgym.server.faults import FAULT_MODES
 from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
 from assetopsgym.server.sim import Sim
-from assetopsgym.server.variant import Technician as SimTech
-from assetopsgym.server.variant import Variant
+from assetopsgym.server.variant import Technician, Variant, from_dict
 
 
 @pytest.mark.parametrize("vid", sorted(VARIANTS))
-def test_scenario_round_trips_variant(vid):
+def test_variant_loads_from_its_json(vid):
     v = VARIANTS[vid]
-    s = Scenario.from_variant(v)
-    assert s.to_variant() == v
-    assert s.scoring == ("faulty" if v.mode else "healthy")
-    assert Scenario.model_validate_json(s.model_dump_json()) == s
+    row = json.loads(json.dumps(asdict(v), default=datetime.isoformat))
+    assert from_dict(Variant, row) == v
+    assert v.scoring == ("faulty" if v.mode else "healthy")
+
+
+def test_from_dict_sparse_row_and_unknown_keys():
+    v = from_dict(Variant, {
+        "id": "x", "mode": None, "start": "2026-07-01T00:00:00",
+        "crew": [{"id": "T1", "skills": ["CH-SENSOR"]}],
+        "tags": ["shift"]})
+    assert v.crew == (Technician("T1", ("CH-SENSOR",)),)
+    assert v.start == datetime(2026, 7, 1) and v.tags == ("shift",)
+    assert v.pf_days == Variant("y", None).pf_days
+    with pytest.raises(KeyError):
+        from_dict(Variant, {"id": "x", "mode": None, "onset": 3})
 
 
 @pytest.mark.parametrize("vid", sorted(VARIANTS))
@@ -30,13 +41,16 @@ def test_result_state_and_events_validate(vid):
     v = VARIANTS[vid]
     sim = Sim(v)
     sim.advance(24 * 30)
-    SimState.model_validate(sim.state())
+    st = sim.state()
+    assert st.sim_time == sim.now and 0 <= st.severity <= 1
     sim.file_wo("CH-CWFLOW", priority=2)
     sim.run_to_end()
-    r = EpisodeResult.model_validate(sim.result())
+    r = sim.result()
     assert r.events == len(sim.events)
-    for a in sim.alerts:
-        AlertEvent.model_validate(a.public())
+    raised = [e.id for e in sim.events if isinstance(e, AlertEvent)]
+    assert raised == [a.id for a in sim.alerts]
+    with pytest.raises(ValueError):
+        replace(r, cost_total=r.cost_total + 1)
     # Every dollar in the score has a cost event behind it, by kind.
     by_kind = {}
     for e in sim.events:
@@ -76,21 +90,19 @@ def test_inject_fault_at_run_time():
     sim.advance(24 * 10)
     sim.inject_fault("CH-REFLEAK", sim.now, pf_days=10)
     sim.run_to_end()
-    assert sim.ever_failed and sim.result()["mode"] == "CH-REFLEAK"
+    assert sim.ever_failed and sim.result().mode == "CH-REFLEAK"
     with pytest.raises(ValueError):
         sim.inject_fault("CH-NOPE", sim.now, 1)
 
 
 def test_crew_without_the_skill_waits_for_a_contractor():
     base = VARIANTS["compwear_late"]
-    small = Variant(**{**base.__dict__, "id": "compwear_smallcrew",
-                       "crew": (SimTech("TECH-01", skills=("CH-CWFLOW", "CH-REFLEAK")),)})
+    small = replace(base, id="compwear_smallcrew", crew=(
+        Technician("TECH-01", skills=("CH-CWFLOW", "CH-REFLEAK")),))
     wo_full = run_one(base)
     wo_small = run_one(small)
     assert wo_small.arrive_at - wo_full.arrive_at >= timedelta(hours=CONTRACTOR_DELAY_H)
     assert wo_small.sla_breach and not wo_full.sla_breach
-    assert Scenario.from_variant(small).crew.technicians[0] == Technician(id="TECH-01",
-                                                                         skills=["CH-CWFLOW", "CH-REFLEAK"])
 
 
 def run_one(v):
@@ -103,6 +115,7 @@ def run_one(v):
 
 def test_default_crew_leaves_reference_scores_alone():
     for v in VARIANTS.values():
-        assert score(v, run(v, do_nothing)["cost_total"]) == (0.0 if v.mode else 1.0)
-        assert score(v, run(v, oracle)["cost_total"]) >= 0.95
+        nothing = score(v, run(v, do_nothing).cost_total)
+        assert nothing == (0.0 if v.mode else 1.0)
+        assert score(v, run(v, oracle).cost_total) >= 0.95
         assert all(m in FAULT_MODES for m in [v.mode] if m)

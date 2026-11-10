@@ -110,8 +110,10 @@ still do the old thing.
   shape; CouchDB is a mirror and AOB's WO server serves
   the reads. This removes the WO date patching. The one
   wall-clock patch left is `latest_reading`'s age (AOB
-  reads the real clock there); remove it with an upstream
-  PR that adds a `now` parameter (T11's contribution).
+  reads the real clock there); it stays in the gym.
+- **Never change AssetOpsBench.** No PRs or patches to
+  it (IBM may use it internally). Work around its
+  behaviour at the gym boundary.
 - **Errors: one exception class plus an enum.**
   `GymError(code: ErrorCode, message)` is the only
   exception subclass (the one allowed exception to "no
