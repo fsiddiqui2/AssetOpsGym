@@ -18,7 +18,8 @@ validation:
   capabilities:
     verifier:
       kind: reward_channel
-    declared_tools: [current_time, advance_time, list_alerts, finish, sites, asset_ids, asset_detail, assets,
+    declared_tools: [current_time, advance_time, list_alerts, acknowledge_alert,
+                     shelve_alert, finish, sites, asset_ids, asset_detail, assets,
                      installed_sensors, measured_sensors, stream_extent, history, latest_reading, sensor_stats,
                      sensor_coverage, list_workorders, get_workorder, get_failure_codes, generate_work_order,
                      update_workorder, cancel_workorder]

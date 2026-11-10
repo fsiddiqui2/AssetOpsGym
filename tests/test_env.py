@@ -67,3 +67,19 @@ def test_oracle_through_the_wo_server_scores_one(env):
     _, obs = call(env, "finish")
     assert obs.done and obs.reward >= 0.95
     assert obs.metadata["result"]["failure_prevented"]
+
+
+def test_alert_tools(env):
+    env.reset(variant="healthy_noisy")
+    out, _ = call(env, "advance_time", hours=72)
+    alert = out["new_alerts"][0]
+    acked, _ = call(env, "acknowledge_alert", alert_id=alert["id"])
+    assert acked["id"] == alert["id"]
+    left, _ = call(env, "list_alerts", unacked_only=True, limit=200)
+    assert alert["id"] not in {a["id"] for a in left["alerts"]}
+    shelf, _ = call(env, "shelve_alert", rule=alert["rule"], hours=168)
+    assert shelf["rule"] == alert["rule"]
+    out, _ = call(env, "advance_time", hours=168)
+    assert alert["rule"] not in {a["rule"] for a in out["new_alerts"]}
+    bad, _ = call(env, "shelve_alert", rule="chiller_trip", hours=1)
+    assert "error" in bad

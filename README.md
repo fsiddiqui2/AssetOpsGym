@@ -9,12 +9,13 @@ An [OpenEnv](https://github.com/openenv/OpenEnv) environment where an LLM agent 
 - **Tools.**
   - AssetOpsBench IoT tools: `history`, `sensor_stats`, `latest_reading`, …
   - AssetOpsBench work-order tools: `generate_work_order`, `update_workorder`, `get_workorder`, …
-  - Gym tools: `current_time`, `advance_time`, `list_alerts`, `finish`.
+  - Gym tools: `current_time`, `advance_time`, `finish`.
+  - Alert tools: `list_alerts`, `acknowledge_alert`, `shelve_alert` (in-process, `server="alerts"` in `schemas.AGENT_TOOLS`).
 - **Faults.** One latent fault per faulty variant grows from its onset until the chiller trips. Its primary sensor:
   - condenser flow restriction: condenser water flow
   - refrigerant leak: evaporator approach
   - compressor wear: % loaded vs tonnage
-- **Alerts.** The building management system raises operator alarms (2-hour on-delay, late) and analytics alerts (instant, noisy, also fired by sensor blips).
+- **Alerts.** The building management system raises operator alarms (fixed threshold held 2–3 h, late; 7 rules, 2 of them from AssetOpsBench's chiller rules) and analytics alerts (rule metric 3σ above its own last 24 h; about 1.5 a day when healthy, 3.7 with blips; they carry no fault signal). The agent can acknowledge an alert or shelve a rule for up to 168 h; shelved alerts are recorded but hidden, so shelving the fault's rule hides its alarm.
 - **Maintenance.** The planner approves the agent's work orders and a technician comes. Technicians may not show up, and the compressor job waits 48 h for parts. The technician does the work named by the failure code, and everything is written back to the work-order store, where the agent can read it.
 - **Ledger.** Every cost, downtime span, failure, alert and work-order transition is a typed event (`schemas.LedgerEvent`) in `Sim.events`; the score's totals and the proposal's five KPIs (downtime, missed failures, false dispatches, alert load, SLA breaches) are folds over it.
 - **Crew.** A scenario names its technicians, their skills and travel time. A job nobody on the crew can do waits 48 h for a contractor. Arriving later than the priority's response target is an SLA breach.
@@ -104,7 +105,7 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 Each line names its owner task on the team board.
 
 - **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise (`analysis/chiller6.md`), and Dhaval's MATLAB failure-mode list replaces our three modes.
-- **Alerts live inside the gym** with fixed thresholds. The separate alert MCP server, with operator alarms vs analytics alerts, is T7.
+- **Alerts run in the gym's process**, not a separate MCP server. Acknowledge and shelve are free until T2 prices them; no chatter-rate knob yet (T7, d07).
 - **Cost priors are flat guesses**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
 - **Work-order edits** after the technician arrives are ignored. A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
 - **Each environment instance starts its own IoT and WO server processes** (about 10 s). The AssetOpsBench servers read their database names from the environment at start, so sharing one server pair across episodes needs a change upstream (T4, T11).

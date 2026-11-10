@@ -3,7 +3,8 @@
 The agent sees two kinds of MCP tools, all routed through step():
   * AssetOpsBench's own IoT and work-order tools, proxied to real server
     processes reading this episode's CouchDB databases;
-  * the gym's tools: current_time, advance_time, list_alerts, finish.
+  * the gym's tools: current_time, advance_time, finish;
+  * the alert tools: list_alerts, acknowledge_alert, shelve_alert.
 
 The world is frozen between calls. advance_time is the only thing that moves the
 clock: the simulator runs, new telemetry is written to CouchDB (only the past is
@@ -35,7 +36,8 @@ from openenv.core.env_server.types import Action, Observation, State
 from ..profiling import Profiler
 from .aob import AOBBridge, Couch
 from .scenarios import VARIANTS, reference_costs, score
-from .sim import ASSET, FAILURE_CODES, INSTALLED_SENSORS, SITE, Sim, Variant, iso
+from .sim import (ASSET, FAILURE_CODES, INSTALLED_SENSORS, MAX_SHELVE_H,
+                  SITE, Sim, Variant, iso)
 
 IOT_TOOLS = ("sites", "asset_ids", "asset_detail", "assets", "installed_sensors", "measured_sensors",
              "stream_extent", "history", "latest_reading", "sensor_stats", "sensor_coverage")
@@ -47,7 +49,9 @@ INSTRUCTION = """You are the reliability engineer on call for site {site}. {asse
 
 It is now {now}. Your shift covers the next {days} days, until {end}. Simulated time is frozen between your actions and moves only when you call advance_time(hours), at most {max_h} hours per call. Reading data is free.
 
-The building management system raises alerts, listed by list_alerts and summarized by advance_time. Operator alarms have a 2-hour on-delay; analytics alerts fire instantly and can be noisy.
+The building management system raises alerts, listed by list_alerts and summarized by advance_time. Operator alarms fire once a rule's condition has held for 2-3 hours; analytics alerts fire instantly and can be noisy.
+
+acknowledge_alert marks an alert as seen; shelve_alert hides a rule's new alerts for up to {max_shelve} hours, and shelved alerts are never shown to you.
 
 If you believe a fault is developing, open a corrective work order for asset {asset} at site {site} with generate_work_order and set its failure code with update_workorder (get_failure_codes lists them). The maintenance planner approves work orders and dispatches a technician; follow progress with get_workorder. The technician performs the work named by the failure code. Every technician visit costs money, and an unplanned chiller trip costs far more than planned work.
 
@@ -113,15 +117,32 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return await asyncio.to_thread(env._locked, env._advance, hours)
 
         @mcp.tool
-        def list_alerts(since: Optional[str] = None, kind: Optional[str] = None, limit: int = 50) -> dict:
-            """Building-management alerts raised so far, oldest first.
+        def list_alerts(since: Optional[str] = None,
+                        kind: Optional[str] = None, limit: int = 50,
+                        unacked_only: bool = False) -> dict:
+            """Building-management alerts raised so far, oldest
+            first. Shelved alerts are hidden.
 
             Args:
                 since: optional ISO 8601 lower bound on alert time.
-                kind: optional filter, "operator_alarm" (2-hour on-delay) or "analytics" (instant, noisy).
+                kind: optional filter, "operator_alarm" (condition held 2-3 h) or "analytics" (instant, noisy).
                 limit: maximum alerts returned, newest kept (1-200).
+                unacked_only: only alerts not yet acknowledged.
             """
-            return env._alerts(since, kind, limit)
+            return env._alerts(since, kind, limit, unacked_only)
+
+        @mcp.tool
+        async def acknowledge_alert(alert_id: str) -> dict:
+            """Mark an alert as seen, by its id (e.g. "AL17")."""
+            return await asyncio.to_thread(env._locked, env._ack, alert_id)
+
+        @mcp.tool
+        async def shelve_alert(rule: str, hours: float) -> dict:
+            """Hide new alerts of one rule (e.g.
+            "low_condenser_water_flow") for 0.25-168 hours. The rule
+            keeps evaluating; its alerts are recorded, not shown."""
+            return await asyncio.to_thread(
+                env._locked, env._shelve, rule, hours)
 
         @mcp.tool
         async def finish() -> dict:
@@ -177,6 +198,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
         self._state = GymState(episode_id=episode_id, step_count=0, variant=v.id, sim_time=iso(self.sim.now))
         text = INSTRUCTION.format(site=SITE, asset=ASSET, now=iso(self.sim.now), end=iso(v.end),
                                   days=v.horizon_days, max_h=MAX_ADVANCE_H,
+                                  max_shelve=MAX_SHELVE_H,
                                   history_start=iso(v.start - timedelta(days=v.history_days)))
         return Observation(done=False, reward=0.0, metadata={
             "instruction": text, "site": SITE, "asset": ASSET, "episode_id": episode_id,
@@ -238,7 +260,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 self._write_rows(rows)
             with self.prof.span("couch.flush_wo"):
                 updates = self._flush_changes()
-        alerts = [a.public() for a in self.sim.alerts[seen:]]
+        alerts = [a.public() for a in self.sim.alerts[seen:] if not a.shelved]
         out = {"sim_time": iso(self.sim.now), "shift_end": iso(self.sim.v.end),
                "sim_hours_advanced": (self.sim.now - before).total_seconds() / 3600,
                "new_telemetry_rows": len(rows), "new_alert_count": len(alerts), "new_alerts": alerts[-30:],
@@ -248,13 +270,33 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             self._end("horizon reached")
         return out
 
-    def _alerts(self, since, kind, limit) -> dict:
+    def _alerts(self, since, kind, limit, unacked_only) -> dict:
         if self.sim is None:
             return {"error": "call reset first"}
-        items = [a.public() for a in self.sim.alerts
-                 if (kind is None or a.kind == kind) and (since is None or iso(a.time) >= since)]
+        items = [a.public() for a in self.sim.visible_alerts()
+                 if (kind is None or a.kind == kind)
+                 and (since is None or iso(a.time) >= since)
+                 and not (unacked_only and a.acked_at)]
         limit = max(1, min(200, int(limit)))
         return {"total": len(items), "returned": min(limit, len(items)), "alerts": items[-limit:]}
+
+    def _ack(self, alert_id: str) -> dict:
+        if self.sim is None:
+            return {"error": "call reset first"}
+        try:
+            a = self.sim.acknowledge(str(alert_id))
+        except KeyError as e:
+            return {"error": str(e)}
+        return {"id": a.id, "acked_at": iso(a.acked_at)}
+
+    def _shelve(self, rule: str, hours: float) -> dict:
+        if self.sim is None:
+            return {"error": "call reset first"}
+        try:
+            until = self.sim.shelve(str(rule), float(hours))
+        except (KeyError, ValueError, TypeError) as e:
+            return {"error": str(e)}
+        return {"rule": rule, "shelved_until": iso(until)}
 
     def _finish(self) -> dict:
         if self.sim is None:
