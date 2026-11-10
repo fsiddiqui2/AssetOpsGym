@@ -1,4 +1,5 @@
-"""The four interfaces the team meets at, as pydantic models.
+"""The four interfaces the team meets at: pydantic models, and
+frozen dataclasses for the tool results (FastMCP schemas them).
 
 Drafted from what the MVP already does, so every model here round-trips an object
 the code produces today (see tests/test_schemas.py). The simulator keeps its
@@ -7,15 +8,20 @@ dataclasses internally; these are the contracts T2, T4, T7 and T8 write to.
     1. Scenario          what one task variant specifies           (T1, T2)
     2. Simulator API     advance, inject a fault, repair, read state (T5, T6, T8)
     3. Ledger events     costs, downtime, failures, alerts, requests (T2, T7, T8)
-    4. Agent tool list   AOB tools plus the gym's own                (T3, T4, T9)
+    4. Agent tool results  what the gym's own tools return     (T3, T4, T9)
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Annotated, Literal, Optional, Protocol, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+WoStatus = Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
+AlertKind = Literal["operator_alarm", "analytics"]
 
 # ----------------------------------------------------------------------------
 # 1. Scenario format
@@ -139,7 +145,7 @@ class WorkOrderState(BaseModel):
     wonum: str
     code: Optional[str]
     priority: int
-    status: Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
+    status: WoStatus
     emergency: bool = False
     created: datetime
     tech: Optional[str] = None
@@ -212,7 +218,7 @@ class FailureEvent(_Event):
 
 class AlertEvent(_Event):
     type: Literal["alert"] = "alert"
-    kind: Literal["operator_alarm", "analytics"]
+    kind: AlertKind
     rule: str
     sensor: str
     value: float
@@ -237,7 +243,7 @@ class ServiceRequestEvent(_Event):
 
     type: Literal["service_request"] = "service_request"
     wonum: str
-    status: Literal["WAPPR", "APPR", "INPRG", "COMP", "CAN"]
+    status: WoStatus
     priority: int
     code: Optional[str] = None
     emergency: bool = False
@@ -277,7 +283,7 @@ class EpisodeResult(BaseModel):
     false_dispatches: int
     work_orders: int
     detection_delay_hours: Optional[float]
-    alerts: dict[Literal["operator_alarm", "analytics"], int]
+    alerts: dict[AlertKind, int]
     kpis: KPIs
     events: int = Field(description="ledger length; the events themselves are in Sim.events")
     score: Optional[float] = Field(None, ge=-1, le=1)
@@ -292,68 +298,84 @@ class EpisodeResult(BaseModel):
 
 
 # ----------------------------------------------------------------------------
-# 4. Agent tool list
+# 4. Agent tool results (the tool list is openenv.yaml)
 # ----------------------------------------------------------------------------
 
 
-class ToolSpec(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    name: str
-    server: Literal["gym", "iot", "wo", "alerts"]
-    purpose: str
-
-
-AGENT_TOOLS: list[ToolSpec] = [
-    ToolSpec(name="current_time", server="gym", purpose="simulated now and the shift end"),
-    ToolSpec(name="advance_time", server="gym", purpose="the only thing that moves the clock (0.25-168 h)"),
-    ToolSpec(name="list_alerts", server="alerts",
-             purpose="BMS alerts so far, shelved ones hidden"),
-    ToolSpec(name="acknowledge_alert", server="alerts",
-             purpose="mark an alert as seen"),
-    ToolSpec(name="shelve_alert", server="alerts",
-             purpose="hide a rule's new alerts for 0.25-168 h"),
-    ToolSpec(name="finish", server="gym", purpose="end the shift; the rest is simulated"),
-    *[ToolSpec(name=n, server="iot", purpose="AssetOpsBench IoT server, read-only") for n in (
-        "sites", "asset_ids", "asset_detail", "assets", "installed_sensors", "measured_sensors",
-        "stream_extent", "history", "latest_reading", "sensor_stats", "sensor_coverage")],
-    *[ToolSpec(name=n, server="wo", purpose="AssetOpsBench work-order server") for n in (
-        "list_workorders", "get_workorder", "get_failure_codes", "generate_work_order",
-        "update_workorder", "cancel_workorder")],
-]
-# Deliberately not exposed: approve_workorder, assign_technician, close_workorder (the planner and
-# technicians are simulated, T8), and the KPI / calendar tools (they read the wall clock).
+class ErrorCode(str, Enum):
+    NO_EPISODE = "NO_EPISODE"
+    EPISODE_OVER = "EPISODE_OVER"
+    BAD_ARGUMENT = "BAD_ARGUMENT"
+    NOT_FOUND = "NOT_FOUND"
+    UNKNOWN_RULE = "UNKNOWN_RULE"
 
 
-class ClockResult(BaseModel):
+class GymError(Exception):
+    """A tool call the agent got wrong. The only exception
+    subclass: kinds are ErrorCode values, not subclasses."""
+
+    def __init__(self, code: ErrorCode, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorResult:
+    """AssetOpsBench's tool error shape, {"error": msg}, plus
+    the code its envelope has but drops before replying."""
+
+    error: str
+    error_code: ErrorCode
+
+
+@dataclass(frozen=True, slots=True)
+class ClockResult:
     sim_time: datetime
     shift_end: datetime
     hours_left: float
 
 
-class AdvanceTimeResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class WorkOrderUpdate:
+    wonum: str
+    status: WoStatus
+    time: datetime
+    note: Optional[str]
+
+
+@dataclass(frozen=True, slots=True)
+class AdvanceTimeResult:
     sim_time: datetime
     shift_end: datetime
+    sim_hours_advanced: float
     new_telemetry_rows: int
     new_alert_count: int
-    new_alerts: list[AlertEvent]
-    work_order_updates: list[dict]
+    new_alerts: list[dict]  # sim.Alert.public(), newest 30
+    work_order_updates: list[WorkOrderUpdate]
     shift_over: bool
 
 
-class ListAlertsResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ListAlertsResult:
     total: int
     returned: int
-    alerts: list[AlertEvent]
-
-    @field_validator("alerts")
-    @classmethod
-    def _bounded(cls, v):
-        if len(v) > 200:
-            raise ValueError("limit is 200")
-        return v
+    alerts: list[dict]  # sim.Alert.public(), at most 200
 
 
-class FinishResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class AckResult:
+    id: str
+    acked_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ShelveResult:
+    rule: str
+    shelved_until: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FinishResult:
     message: str
-    score: float = Field(ge=-1, le=1)
+    score: float

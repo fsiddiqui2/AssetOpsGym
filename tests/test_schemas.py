@@ -4,17 +4,16 @@ is a complete account of the score."""
 from datetime import timedelta
 
 import pytest
-import yaml
 
-from assetopsgym.schemas import (AGENT_TOOLS, AlertEvent, CostEvent, EpisodeResult, Scenario, SimState,
-                                 Technician)
+from assetopsgym.schemas import (AlertEvent, CostEvent, EpisodeResult, Scenario, SimState,
+                                 Technician, ErrorCode, ErrorResult,
+                                 GymError)
 from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
 from assetopsgym.server.faults import FAULT_MODES
 from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
 from assetopsgym.server.sim import Sim
 from assetopsgym.server.variant import Technician as SimTech
 from assetopsgym.server.variant import Variant
-from pathlib import Path
 
 
 @pytest.mark.parametrize("vid", sorted(VARIANTS))
@@ -50,10 +49,25 @@ def test_result_state_and_events_validate(vid):
     assert abs(spans - sum(sim.hours.values())) < 1e-6
 
 
-def test_tool_list_matches_manifest():
-    manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "openenv.yaml").read_text())
-    declared = manifest["validation"]["capabilities"]["declared_tools"]
-    assert [t.name for t in AGENT_TOOLS] == declared
+def test_tool_check_is_loud():
+    from assetopsgym.server.environment import MANIFEST, check_tools
+
+    assert MANIFEST.name == "assetopsgym" and "finish" in MANIFEST.tools
+    check_tools(list(reversed(MANIFEST.tools)), MANIFEST.tools)
+    for bad in (MANIFEST.tools[1:], [*MANIFEST.tools, "x"]):
+        with pytest.raises(RuntimeError):
+            check_tools(list(bad), MANIFEST.tools)
+
+
+def test_gym_error_becomes_error_result():
+    from assetopsgym.server.environment import _errors_as_results
+
+    def bad(x: int) -> int:
+        raise GymError(ErrorCode.BAD_ARGUMENT, f"no {x}")
+
+    assert _errors_as_results(bad)(3) == ErrorResult(
+        error="no 3", error_code=ErrorCode.BAD_ARGUMENT)
+    assert _errors_as_results(abs)(-2) == 2
 
 
 def test_inject_fault_at_run_time():

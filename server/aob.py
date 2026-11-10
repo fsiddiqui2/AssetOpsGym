@@ -69,7 +69,10 @@ class Couch:
 
     def get(self, key: str, doc_id: str) -> dict | None:
         r = self._req("GET", f"{self.db[key]}/{quote(doc_id, safe='')}")
-        return r.json() if r.status_code == 200 else None
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
 
     def put(self, key: str, doc: dict) -> None:
         self._req("PUT", f"{self.db[key]}/{quote(doc['_id'], safe='')}", json=doc).raise_for_status()
