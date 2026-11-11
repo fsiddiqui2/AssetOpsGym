@@ -41,6 +41,10 @@ run = "uv run openenv validate . --level static"
 description = "vLLM on :8001, on a GPU box (GCP VM or Insomnia node)"
 run = "infra/serve.sh"
 
+[tasks.mlx]
+description = "Qwen3-8B 4-bit on :8001, on an Apple-silicon laptop (no GPU box)"
+run = "infra/mlx.sh"
+
 [tasks.gcp]
 description = "GPU VM: up spot|ondemand, tunnel, ssh, stop, start, down"
 run = "infra/gcp.sh"

@@ -64,6 +64,7 @@ OPENAI_BASE_URL=https://api.tokenrouter.com/v1 OPENAI_API_KEY=... \
   uv run python -m assetopsgym.agent --variant refleak_mid
 mise run plan-execute -- --variant refleak_mid --model Qwen/Qwen2.5-3B-Instruct   # AssetOpsBench's Plan-Execute agent
 infra/serve.sh                                 # vLLM on :8001 (GPU box); agent: OPENAI_BASE_URL=http://localhost:8001/v1
+infra/mlx.sh                                   # or Qwen3-8B 4-bit on :8001 on an Apple-silicon laptop; --model mlx-community/Qwen3-8B-4bit
 uv run openenv validate . --level static       # manifest check
 ```
 
