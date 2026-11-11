@@ -22,6 +22,14 @@ run = "uv run server"
 description = "zero-shot agent; OPENAI_BASE_URL picks the model server"
 run = "uv run python -m assetopsgym.agent"
 
+[tasks.plan-execute]
+description = "AssetOpsBench Plan-Execute agent, in its environment; needs --model"
+run = "uv run --no-sync --project ${AOB_DIR:-../AssetOpsBench} --with-editable '.[profile]' python -P -m assetopsgym.plan_execute"
+
+[tasks.rollouts]
+description = "N episodes at once, rollouts per GPU-hour; needs --agent --model --episodes"
+run = "uv run python -m assetopsgym.rollouts"
+
 [tasks.baselines]
 description = "admission-anchor table"
 run = "uv run python -m assetopsgym.baselines"

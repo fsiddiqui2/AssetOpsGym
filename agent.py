@@ -23,18 +23,26 @@ from openai import OpenAI
 from assetopsgym import AssetOpsGymEnv, CallToolAction
 from assetopsgym.profiling import Profiler
 
+NAME = "tool_loop"  # this agent, in profiles and rollouts.py
+DEFAULT_LIMIT = 60  # turns
 MAX_TOOL_CHARS = 6000
 GUIDE = ("Work like an engineer on shift: check the data, decide how far to advance time, and act on evidence. "
          "Tool results longer than a few thousand characters are cut off, so prefer sensor_stats over a time "
          "window, and pass sensors and a small limit to history.")
 
 
-def _content(obs) -> str:
+def tool_data(obs):
+    """A tool observation's payload (no error)."""
+    result = obs.result
+    return (result.get("data") if isinstance(result, dict)
+            else getattr(result, "data", result))
+
+
+def tool_text(obs) -> str:
+    """What the model reads back from a tool call."""
     if obs.error is not None:
         return json.dumps({"error": obs.error.message})
-    result = obs.result
-    data = result.get("data") if isinstance(result, dict) else getattr(result, "data", result)
-    text = json.dumps(data, default=str)
+    text = json.dumps(tool_data(obs), default=str)
     if len(text) > MAX_TOOL_CHARS:
         text = text[:MAX_TOOL_CHARS] + f"... [truncated {len(text) - MAX_TOOL_CHARS} chars; narrow the query]"
     return text
@@ -44,8 +52,7 @@ def _sim_hours(obs) -> float:
     """Simulated hours an advance_time call actually moved, from its own result."""
     if obs.error is not None:
         return 0.0
-    result = obs.result
-    data = result.get("data") if isinstance(result, dict) else getattr(result, "data", result)
+    data = tool_data(obs)
     return float(data.get("sim_hours_advanced", 0.0)) if isinstance(data, dict) else 0.0
 
 
@@ -58,10 +65,11 @@ def call_tool(env, prof: Profiler, name: str, args: dict):
 
 
 def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: int,
-                prof: Profiler | None = None) -> dict:
+                prof: Profiler | None = None,
+                seed: int | None = None) -> dict:
     prof = prof or Profiler()
     with prof.span("client.reset"):
-        reset = env.reset(variant=variant)
+        reset = env.reset(variant=variant, seed=seed)
     prof.episode_id = reset.observation.metadata.get("episode_id")
     tools = [{"type": "function", "function": {"name": t.name, "description": t.description[:1000],
                                                "parameters": t.input_schema or {"type": "object", "properties": {}}}}
@@ -88,20 +96,28 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
             except ValueError:
                 args = {}
             step = call_tool(env, prof, tc.function.name, args)
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": _content(step.observation)})
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": tool_text(step.observation)})
             if step.done:
                 break
         if step is not None and step.done:
             break
     if step is None or not step.done:  # out of turns: score the state reached, as FDE-Gym does
         step = call_tool(env, prof, "finish", {})
+    return report(step, prof, model, NAME)
+
+
+def report(step, prof: Profiler, model: str, agent: str) -> dict:
+    """Emit the agent-side profile of a finished episode and
+    return its summary. `agent` names the agent in the sinks."""
     result = step.observation.metadata.get("result", {})
-    profile = prof.emit(side="agent", variant=result.get("variant"), model=model, score=step.reward,
+    profile = prof.emit(side="agent", agent=agent,
+                        variant=result.get("variant"), model=model, score=step.reward,
                         end_reason=result.get("end_reason"),
                         episode_id=prof.episode_id,
                         server=(result.get("profile") or {}).get("derived"))
     d = profile["derived"]
-    return {"variant": result.get("variant"), "model": model, "score": step.reward,
+    return {"variant": result.get("variant"), "agent": agent,
+            "model": model, "score": step.reward,
             "failure_prevented": result.get("failure_prevented"), "false_dispatches": result.get("false_dispatches"),
             "detection_delay_hours": result.get("detection_delay_hours"), "cost_total": result.get("cost_total"),
             "end_reason": result.get("end_reason"), "tool_calls": d["tool_calls"],
@@ -116,7 +132,7 @@ def main():
     p.add_argument("--url", default="http://localhost:8000")
     p.add_argument("--variant", default=None)
     p.add_argument("--model", default="openai/gpt-5-mini")
-    p.add_argument("--max-turns", type=int, default=60)
+    p.add_argument("--max-turns", type=int, default=DEFAULT_LIMIT)
     a = p.parse_args()
     with AssetOpsGymEnv(base_url=a.url, message_timeout_s=300).sync() as env:
         print(json.dumps(run_episode(env, OpenAI(), a.model, a.variant, a.max_turns), indent=2))

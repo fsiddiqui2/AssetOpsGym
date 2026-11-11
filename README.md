@@ -62,6 +62,7 @@ uv run pytest -q                               # anchors + end-to-end through th
 uv run server                                  # OpenEnv server on :8000 (PORT to change)
 OPENAI_BASE_URL=https://api.tokenrouter.com/v1 OPENAI_API_KEY=... \
   uv run python -m assetopsgym.agent --variant refleak_mid
+mise run plan-execute -- --variant refleak_mid --model Qwen/Qwen2.5-3B-Instruct   # AssetOpsBench's Plan-Execute agent
 infra/serve.sh                                 # vLLM on :8001 (GPU box); agent: OPENAI_BASE_URL=http://localhost:8001/v1
 uv run openenv validate . --level static       # manifest check
 ```
@@ -109,8 +110,10 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 | `server/mirror.py` | CouchDB as a mirror: asset and failure-code catalogs, telemetry rows, WO documents folded from the events |
 | `server/prompt.py` | the agent's instruction |
 | `server/app.py`, `client.py`, `openenv.yaml` | OpenEnv packaging |
+| `rollouts.py` | runs many episodes at once for either agent (`--envs` sessions, `--episodes`, seeds from `--seed0`) and reports rollouts per hour and per GPU-hour; the server needs `MAX_CONCURRENT_ENVS` ≥ `--envs` |
 | `baselines.py`, `tests/` | reference policies, anchors, integration tests |
-| `agent.py` | zero-shot agent over any OpenAI-compatible endpoint (TokenRouter, vLLM) |
+| `agent.py` | zero-shot agent over any OpenAI-compatible endpoint (TokenRouter, vLLM): a tool-calling loop that keeps the whole conversation |
+| `plan_execute.py` | AssetOpsBench's Plan-Execute agent, zero-shot, one run per decision round: each round plans, executes and ends in `advance_time`; the previous round's answer is carried as notes. Runs in AssetOpsBench's environment (`mise run plan-execute`); its code is unchanged |
 
 ## Known ceilings (deliberate, for the MVP)
 

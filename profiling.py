@@ -33,6 +33,7 @@ Span names are dotted; the first segment is the stage. The ones the code emits:
     mcp.aob                                 a proxied AssetOpsBench call (attrs: server, tool)
     llm.chat                                agent side (attrs: prompt_tokens, completion_tokens)
     client.step                             agent side, one env.step over HTTP (attrs: tool)
+    agent.round                             one Plan-Execute run (attrs: round, steps)
 
 GPU utilisation and memory come from `GPUSampler`, which polls nvidia-smi on the
 serving host; on a machine without one it reports `available: False`.
