@@ -235,6 +235,8 @@ class KPIs:
     false_dispatches: int
     alert_load: int
     sla_breaches: int
+    # inspection visits (investigate); not false dispatches
+    investigations: int = 0
 
 
 @dataclass(frozen=True, slots=True)

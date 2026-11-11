@@ -26,6 +26,6 @@ validation:
                      shelve_alert, finish, sites, asset_ids, asset_detail, assets,
                      installed_sensors, measured_sensors, stream_extent, history, latest_reading, sensor_stats,
                      sensor_coverage, list_workorders, get_workorder, get_failure_codes, generate_work_order,
-                     update_workorder, cancel_workorder]
+                     update_workorder, cancel_workorder, investigate]
   types:
     tags: [industrial, maintenance, mcp, assetopsbench]

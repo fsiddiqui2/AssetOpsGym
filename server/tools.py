@@ -21,6 +21,7 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic_core import to_jsonable_python
 
 from ..schemas import ErrorResult, GymError, WorkOrderMutationResult
+from .faults import SUBSYSTEMS
 from .maintenance import WorkOrder
 from .sim import Sim
 
@@ -103,7 +104,8 @@ Write = Callable[[str, Callable[[Sim], WorkOrder]], Awaitable[Mutation]]
 
 def wo_write_tools(write: Write) -> tuple[Callable, ...]:
     """AssetOpsBench's WO writes: its names, arguments and result
-    shape. Left out: generate's aob_source (a provenance dict)."""
+    shape (left out: generate's aob_source, a provenance dict).
+    Then the gym's own: investigate."""
 
     async def generate_work_order(
             description: str, asset_num: str, site_id: str,
@@ -143,4 +145,18 @@ def wo_write_tools(write: Write) -> tuple[Callable, ...]:
         return await write("cancelled (CAN)", lambda sim:
                            sim.cancel_workorder(wonum, site_id, reason))
 
-    return generate_work_order, update_workorder, cancel_workorder
+    async def investigate(subsystem: str, priority: int = 3,
+                          notes: Optional[str] = None) -> Mutation:
+        """Send a technician to inspect one part of the chiller:
+        {parts}. Opens an inspection work order; nothing is
+        repaired and the chiller keeps running. The finding comes
+        back as that order's update once the visit is done: the
+        fault and its failure code, or nothing abnormal. A fault
+        elsewhere, or one still too small to see, is not found."""
+        return await write("created (WAPPR)", lambda sim:
+                           sim.investigate(subsystem, priority, notes))
+
+    investigate.__doc__ = investigate.__doc__.format(
+        parts=", ".join(SUBSYSTEMS))
+    return (generate_work_order, update_workorder,
+            cancel_workorder, investigate)

@@ -13,7 +13,8 @@ from enum import Enum
 
 from ..schemas import (CostEvent, ErrorCode, GymError,
                        ServiceRequestEvent, WoStatus)
-from .faults import FAILURE_CODES, Fault, severity
+from .faults import (FAILURE_CODES, INSPECT_MIN_SEVERITY, SUBSYSTEMS,
+                     Fault, severity)
 from .ledger import Ledger
 from .telemetry import ASSET, SITE
 from .variant import TICK, TICK_H, Technician, Variant, iso
@@ -57,6 +58,7 @@ class WorkOrder:
     reported_by: str | None = None
     work_type: str = "CM"
     location: str | None = None
+    inspect: str | None = None  # the subsystem investigate() named
     emergency: bool = False
     canceled: bool = False
     approve_at: datetime | None = None
@@ -101,6 +103,11 @@ def dispatched(w: WorkOrder) -> bool:
     return Action.ARRIVE in w.done
 
 
+def inspection(w: WorkOrder) -> bool:
+    """Still an inspection: no failure code was added to it."""
+    return w.inspect is not None and w.code is None
+
+
 def repairing(m: Maintenance) -> bool:
     return any(w.code and Action.START in w.done
                and status(w) == "INPRG" for w in m.wos.values())
@@ -135,6 +142,24 @@ def generate_work_order(m: Maintenance, l: Ledger, v: Variant,
                    reported_by=reported_by, work_type=work_type,
                    location=location)
     return _request(m, l, now, wo, notes or "Service request filed.")
+
+
+def investigate(m: Maintenance, l: Ledger, v: Variant,
+                now: datetime, subsystem: str, priority: int,
+                notes: str | None) -> WorkOrder:
+    """An inspection order for one subsystem. Nothing is repaired
+    and the chiller keeps running; the finding is the technician's
+    closing note."""
+    if subsystem not in SUBSYSTEMS:
+        raise GymError(
+            ErrorCode.BAD_ARGUMENT,
+            f"unknown subsystem {subsystem!r}; one of "
+            f"{', '.join(SUBSYSTEMS)}")
+    wo = WorkOrder(_wonum(m, None, "SIM"), None, _priority(priority),
+                   now, _rng(m, v),
+                   description=f"Inspect the {subsystem}",
+                   work_type="INSP", inspect=subsystem)
+    return _request(m, l, now, wo, notes or "Inspection requested.")
 
 
 def update_workorder(m: Maintenance, l: Ledger, v: Variant,
@@ -252,7 +277,9 @@ def _arrive(m: Maintenance, l: Ledger, f: Fault, v: Variant,
     wo.finish_at = wo.start_at + timedelta(hours=work)
     _push(m, wo, Action.START, wo.start_at)
     _push(m, wo, Action.FINISH, wo.finish_at)
-    if fc is None:
+    if inspection(wo):
+        note = f"{wo.tech} on site to inspect the {wo.inspect}."
+    elif fc is None:
         note = (f"{wo.tech} on site; no failure code given, general "
                 "inspection only.")
     else:
@@ -272,9 +299,10 @@ def _finish(m: Maintenance, l: Ledger, f: Fault, v: Variant,
     wo.done[Action.FINISH] = t
     fc = FAILURE_CODES.get(wo.code)
     if fc is None:
-        _event(l, t, wo, "technician", "General inspection complete: "
-               "no actionable fault identified.",
-               labor_hours=INSPECTION_HOURS)
+        _event(l, t, wo, "technician",
+               _finding(f, wo.inspect, t) if wo.inspect else
+               "General inspection complete: no actionable fault "
+               "identified.", labor_hours=INSPECTION_HOURS)
         return
     mult = EMERGENCY_MULTIPLIER if wo.failed_at_start else 1.0
     l.events.append(CostEvent(time=t, kind="repair",
@@ -290,6 +318,14 @@ def _finish(m: Maintenance, l: Ledger, f: Fault, v: Variant,
                    "no matching fault found.")
     _event(l, t, wo, "technician", finding,
            labor_hours=fc.repair_hours)
+
+
+def _finding(f: Fault, subsystem: str, t: datetime) -> str:
+    fc = SUBSYSTEMS[subsystem]
+    if fc.code == f.mode and severity(f, t) >= INSPECT_MIN_SEVERITY:
+        return (f"Inspected the {subsystem}: found {fc.description} "
+                f"(failure code {fc.code}).")
+    return f"Inspected the {subsystem}: nothing abnormal found."
 
 
 HANDLERS = {Action.APPROVE: _approve, Action.ARRIVE: _arrive,

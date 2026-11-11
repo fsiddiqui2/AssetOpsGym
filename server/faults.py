@@ -11,6 +11,7 @@ from ..schemas import FailureEvent, LedgerEvent
 @dataclass(frozen=True)
 class FailureCode:
     code: str
+    subsystem: str  # the part of the chiller investigate() names
     description: str
     repair_cost: float
     repair_hours: float
@@ -18,17 +19,26 @@ class FailureCode:
 
 
 FAILURE_CODES = {fc.code: fc for fc in [
-    FailureCode("CH-CWFLOW", "condenser water flow restriction (clogged "
+    FailureCode("CH-CWFLOW", "condenser",
+                "condenser water flow restriction (clogged "
                 "strainer or fouled condenser tubes)", 2500, 8),
-    FailureCode("CH-REFLEAK", "refrigerant leak or low refrigerant charge",
-                5000, 12),
-    FailureCode("CH-COMPWEAR", "compressor mechanical wear", 12000, 16,
+    FailureCode("CH-REFLEAK", "refrigerant circuit",
+                "refrigerant leak or low refrigerant charge", 5000, 12),
+    FailureCode("CH-COMPWEAR", "compressor",
+                "compressor mechanical wear", 12000, 16,
                 parts_hours=48),
-    FailureCode("CH-EVAPFOUL", "evaporator tube fouling", 3000, 8),
-    FailureCode("CH-SENSOR", "sensor drift or failed transmitter", 800, 3),
-    FailureCode("CH-CONTROLS", "chiller control or setpoint fault", 1200, 4),
+    FailureCode("CH-EVAPFOUL", "evaporator",
+                "evaporator tube fouling", 3000, 8),
+    FailureCode("CH-SENSOR", "sensors",
+                "sensor drift or failed transmitter", 800, 3),
+    FailureCode("CH-CONTROLS", "controls",
+                "chiller control or setpoint fault", 1200, 4),
 ]}
 FAULT_MODES = ("CH-CWFLOW", "CH-REFLEAK", "CH-COMPWEAR")
+SUBSYSTEMS = {fc.subsystem: fc for fc in FAILURE_CODES.values()}
+# An inspection finds a fault from this severity on: about
+# where its primary sensor has moved 3 sigma of its noise.
+INSPECT_MIN_SEVERITY = 0.15
 
 
 @dataclass

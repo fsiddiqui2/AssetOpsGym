@@ -8,8 +8,8 @@ from ..schemas import EpisodeResult, KPIs, SimState, WorkOrderState
 from .alerts import Alert
 from .faults import Fault, severity
 from .ledger import Ledger, costs, downtime_hours
-from .maintenance import (Maintenance, dispatched, repairing,
-                          status)
+from .maintenance import (Maintenance, dispatched, inspection,
+                          repairing, status)
 from .variant import Variant
 
 
@@ -34,14 +34,17 @@ def state(v: Variant, now: datetime, f: Fault,
 
 def kpis(l: Ledger, f: Fault, m: Maintenance,
          alerts: list[Alert]) -> KPIs:
-    """The proposal's five KPIs, folded over the ledger."""
+    """The proposal's five KPIs and the inspection visits, folded
+    over the ledger. An inspection is not a false dispatch."""
     sent = [w for w in m.wos.values() if dispatched(w)]
+    looks = sum(inspection(w) for w in sent)
     return KPIs(
         downtime_hours=round(
             sum(downtime_hours(l.events).values()), 2),
         missed_failures=int(f.ever_failed),
         false_dispatches=sum(f.mode is None or w.code != f.mode
-                             for w in sent),
+                             for w in sent if not inspection(w)),
+        investigations=looks,
         alert_load=len(alerts),
         sla_breaches=sum(w.sla_breach for w in m.wos.values()))
 
@@ -50,7 +53,8 @@ def result(v: Variant, l: Ledger, f: Fault, m: Maintenance,
            alerts: list[Alert]) -> EpisodeResult:
     mode, onset = f.mode, f.onset
     sent = [w for w in m.wos.values() if dispatched(w)]
-    false = [w for w in sent if mode is None or w.code != mode]
+    false = [w for w in sent if not inspection(w)
+             and (mode is None or w.code != mode)]
     agent_hits = [w for w in m.wos.values()
                   if not w.emergency and w.code == mode
                   and onset is not None and w.created >= onset

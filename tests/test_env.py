@@ -140,3 +140,18 @@ def test_step_limit_ends_the_episode(env):
     r = second.metadata["result"]
     assert r["end_reason"] == "step limit", r
     assert env.state.step_count == 2
+
+
+def test_investigate_reports_through_the_work_order(env):
+    env.reset(variant="refleak_mid")
+    for hours in (168, 168, 168, 72):  # day 24: the leak has grown
+        call(env, "advance_time", hours=hours)
+    made, _ = call(env, "investigate",
+                   subsystem="refrigerant circuit", priority=1)
+    out, _ = call(env, "advance_time", hours=36)
+    assert "CH-REFLEAK" in out["work_order_updates"][-1]["note"]
+    got, _ = call(env, "get_workorder", wonum=made["wonum"],
+                  site_id="MAIN")
+    wo = got["work_order"]
+    assert wo["worktype"] == "INSP" and wo["failurecode"] is None
+    assert "CH-REFLEAK" in wo["description_longdescription"]

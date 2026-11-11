@@ -79,6 +79,13 @@ class Sim:
             description, priority, location, asset_num, notes,
             failure_code)
 
+    def investigate(self, subsystem: str, priority: int = 3,
+                    notes: str | None = None
+                    ) -> maintenance.WorkOrder:
+        return maintenance.investigate(
+            self.maint, self.book, self.v, self.now, subsystem,
+            priority, notes)
+
     def cancel_workorder(self, wonum: str, site_id: str,
                          reason: str | None = None
                          ) -> maintenance.WorkOrder:
