@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 from assetopsgym import AssetOpsGymEnv, CallToolAction
 from assetopsgym.profiling import Profiler
@@ -65,22 +67,41 @@ def call_tool(env, prof: Profiler, name: str, args: dict):
     return step
 
 
+def begin(env, prof: Profiler, variant: str | None,
+          seed: int | None) -> dict:
+    """Reset the gym; the episode's id and seed go on the profile.
+    Returns the reset's metadata."""
+    with prof.span("client.reset"):
+        reset = env.reset(variant=variant, seed=seed)
+    meta = reset.observation.metadata
+    prof.episode_id = meta.get("episode_id")
+    prof.meta["seed"] = meta.get("seed")
+    return meta
+
+
 def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: int,
                 prof: Profiler | None = None,
                 seed: int | None = None) -> dict:
     prof = prof or Profiler()
-    with prof.span("client.reset"):
-        reset = env.reset(variant=variant, seed=seed)
-    prof.episode_id = reset.observation.metadata.get("episode_id")
+    meta = begin(env, prof, variant, seed)
     tools = [{"type": "function", "function": {"name": t.name, "description": t.description[:1000],
                                                "parameters": t.input_schema or {"type": "object", "properties": {}}}}
              for t in env.list_tools()]
-    messages = [{"role": "system", "content": reset.observation.metadata["instruction"] + "\n\n" + GUIDE},
+    messages = [{"role": "system", "content": meta["instruction"] + "\n\n" + GUIDE},
                 {"role": "user", "content": "Your shift starts now."}]
     nudges, step = 0, None
+    prof.meta["stopped"] = "turn limit"  # unless something else does
     for turn in range(max_turns):
         with prof.span("llm.chat", turn=turn, messages=len(messages)) as sp:
-            resp = llm.chat.completions.create(model=model, messages=messages, tools=tools)
+            try:
+                resp = llm.chat.completions.create(model=model, messages=messages, tools=tools)
+            except BadRequestError as e:
+                # the conversation outgrew the model: score the
+                # state reached, like running out of turns
+                if "context length" not in str(e):
+                    raise
+                prof.meta["stopped"] = "context full"
+                break
             if resp.usage:
                 sp.set(prompt_tokens=resp.usage.prompt_tokens, completion_tokens=resp.usage.completion_tokens)
         msg = resp.choices[0].message
@@ -88,6 +109,7 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
         if not msg.tool_calls:
             nudges += 1
             if nudges > 2:
+                prof.meta["stopped"] = "no tool calls"
                 break
             messages.append({"role": "user", "content": NUDGE})
             continue
@@ -101,15 +123,19 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
             if step.done:
                 break
         if step is not None and step.done:
+            prof.meta["stopped"] = None  # the episode ended itself
             break
     if step is None or not step.done:  # out of turns: score the state reached, as FDE-Gym does
         step = call_tool(env, prof, "finish", {})
-    return report(step, prof, model, NAME)
+    return report(step, prof, model, NAME, messages)
 
 
-def report(step, prof: Profiler, model: str, agent: str) -> dict:
-    """Emit the agent-side profile of a finished episode and
-    return its summary. `agent` names the agent in the sinks."""
+def report(step, prof: Profiler, model: str, agent: str,
+           transcript: list) -> dict:
+    """Emit the agent-side profile of a finished episode, save the
+    episode (see save) and return its summary. `agent` names the
+    agent in the sinks; prof.meta["stopped"] says why the agent's
+    loop stopped, if the episode did not end by itself."""
     result = step.observation.metadata.get("result", {})
     profile = prof.emit(side="agent", agent=agent,
                         variant=result.get("variant"), model=model, score=step.reward,
@@ -117,7 +143,10 @@ def report(step, prof: Profiler, model: str, agent: str) -> dict:
                         episode_id=prof.episode_id,
                         server=(result.get("profile") or {}).get("derived"))
     d = profile["derived"]
-    return {"variant": result.get("variant"), "agent": agent,
+    summary = {
+            "episode_id": prof.episode_id, "seed": prof.meta.get("seed"),
+            "stopped": prof.meta.get("stopped"),
+            "variant": result.get("variant"), "agent": agent,
             "model": model, "score": step.reward,
             "failure_prevented": result.get("failure_prevented"), "false_dispatches": result.get("false_dispatches"),
             "detection_delay_hours": result.get("detection_delay_hours"), "cost_total": result.get("cost_total"),
@@ -125,7 +154,30 @@ def report(step, prof: Profiler, model: str, agent: str) -> dict:
             "tokens": {"prompt": d["prompt_tokens"], "completion": d["completion_tokens"]},
             "seconds": {"llm": round(d["llm_s"], 1), "env": round(d["env_s"], 1)},
             "tokens_per_sim_hour": d["tokens_per_sim_hour"], "sim_hours_per_wall_s": d["sim_hours_per_wall_s"],
+            "result": {k: v for k, v in result.items() if k != "profile"},
             "profile": profile, "server_profile": result.get("profile")}
+    save(summary, transcript)
+    return summary
+
+
+def _plain(x):
+    """SDK message objects, for json.dumps."""
+    return x.model_dump() if hasattr(x, "model_dump") else str(x)
+
+
+def save(summary: dict, transcript: list) -> None:
+    """With AOG_PROFILE_DIR set: the summary as a line of
+    episodes.jsonl, and what the agent saw and said as
+    transcripts/<episode id>.json."""
+    d = os.environ.get("AOG_PROFILE_DIR")
+    if not d:
+        return
+    out = Path(d) / "transcripts"
+    out.mkdir(parents=True, exist_ok=True)
+    with open(Path(d) / "episodes.jsonl", "a") as f:
+        f.write(json.dumps(summary, default=str) + "\n")
+    (out / f"{summary['episode_id']}.json").write_text(
+        json.dumps(transcript, default=_plain))
 
 
 def make_client() -> OpenAI:

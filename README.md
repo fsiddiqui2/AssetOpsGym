@@ -105,6 +105,8 @@ Rewards only flow through `step()`, which is OpenEnv's simulation path. `list_to
 
 ## Profiling (T10)
 
+With `AOG_PROFILE_DIR` set, every agent also appends each episode's summary and full result to `episodes.jsonl` and writes what it saw and said to `transcripts/<episode id>.json`; the summary's `stopped` says why the agent's loop ended if the episode did not end by itself (turn limit, context full, no tool calls, refusal).
+
 Every stage of a rollout is timed, always, by `profiling.Profiler`: the environment step, each gym tool, the pure simulator, the CouchDB writes, each proxied AssetOpsBench call, and on the agent side each LLM request. The last observation of an episode carries the server-side fold in `metadata.result.profile`; the agent prints its own fold next to it. Both report wall seconds per stage with p50/p95, the LLM vs environment split, simulated hours per wall second, and tokens per simulated hour.
 
 ```bash

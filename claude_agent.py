@@ -21,8 +21,8 @@ import json
 import anthropic
 
 from assetopsgym import AssetOpsGymEnv
-from assetopsgym.agent import (GUIDE, NUDGE, call_tool, report,
-                               tool_text)
+from assetopsgym.agent import (GUIDE, NUDGE, begin, call_tool,
+                               report, tool_text)
 from assetopsgym.profiling import Profiler, Span
 
 NAME = "claude_tool_loop"  # this agent, in profiles and rollouts.py
@@ -51,10 +51,7 @@ def run_episode(env, client: anthropic.Anthropic, model: str,
                 prof: Profiler | None = None,
                 seed: int | None = None) -> dict:
     prof = prof or Profiler()
-    with prof.span("client.reset"):
-        reset = env.reset(variant=variant, seed=seed)
-    meta = reset.observation.metadata
-    prof.episode_id = meta.get("episode_id")
+    meta = begin(env, prof, variant, seed)
     tools = [{"name": t.name, "description": t.description or "",
               "input_schema": t.input_schema
               or {"type": "object", "properties": {}}}
@@ -62,6 +59,7 @@ def run_episode(env, client: anthropic.Anthropic, model: str,
     system = meta["instruction"] + "\n\n" + GUIDE
     messages = [{"role": "user", "content": "Your shift starts now."}]
     nudges, step = 0, None
+    prof.meta["stopped"] = "turn limit"  # unless something else does
     for turn in range(max_turns):
         with prof.span("llm.chat", turn=turn,
                        messages=len(messages)) as sp:
@@ -74,11 +72,13 @@ def run_episode(env, client: anthropic.Anthropic, model: str,
         # the content as it came: thinking blocks must go back whole
         messages.append({"role": "assistant", "content": r.content})
         if r.stop_reason == "refusal":
+            prof.meta["stopped"] = "refusal"
             break
         calls = [b for b in r.content if b.type == "tool_use"]
         if not calls:
             nudges += 1
             if nudges > 2:
+                prof.meta["stopped"] = "no tool calls"
                 break
             messages.append({"role": "user", "content": NUDGE})
             continue
@@ -96,11 +96,13 @@ def run_episode(env, client: anthropic.Anthropic, model: str,
                 "is_error": step.observation.error is not None})
         messages.append({"role": "user", "content": results})
         if step.done:
+            prof.meta["stopped"] = None  # the episode ended itself
             break
     if step is None or not step.done:
         # out of turns: score the state reached
         step = call_tool(env, prof, "finish", {})
-    return report(step, prof, model, NAME)
+    return report(step, prof, model, NAME,
+                  [{"role": "system", "content": system}, *messages])
 
 
 def make_client() -> anthropic.Anthropic:

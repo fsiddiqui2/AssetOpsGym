@@ -1,5 +1,6 @@
 """The Claude tool loop with a scripted client and a fake gym."""
 
+import json
 from types import SimpleNamespace as NS
 
 import pytest
@@ -88,13 +89,22 @@ def test_tool_results_go_back_in_one_message_per_turn():
     assert d["completion_tokens"] == 21 and d["tool_calls"] == 3
 
 
-def test_a_refusal_or_running_out_of_turns_ends_with_finish():
+def test_a_refusal_or_running_out_of_turns_ends_with_finish(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("AOG_PROFILE_DIR", str(tmp_path))
     env = Env()
-    ca.run_episode(env, Model([([], "refusal")]), "m", None, 10)
+    out = ca.run_episode(env, Model([([], "refusal")]), "m", None, 10)
     assert env.calls == [("finish", {})]
+    assert out["stopped"] == "refusal"
+    saved = json.loads((tmp_path / "episodes.jsonl").read_text())
+    assert saved["episode_id"] == "ep" and saved["result"] == {
+        "variant": "fake"}
+    talk = json.loads((tmp_path / "transcripts" / "ep.json").read_text())
+    assert [m["role"] for m in talk] == ["system", "user", "assistant"]
     env = Env()
     forever = [([use(i, "advance_time", {"hours": 1})], "tool_use")
                for i in range(5)]
-    ca.run_episode(env, Model(forever), "m", None, 2)
+    out = ca.run_episode(env, Model(forever), "m", None, 2)
     assert [c[0] for c in env.calls] == ["advance_time",
                                          "advance_time", "finish"]
+    assert out["stopped"] == "turn limit"

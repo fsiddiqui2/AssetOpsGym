@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from agent.plan_execute import executor
@@ -33,8 +33,8 @@ from llm import LLMBackend, LLMResult
 from openai import OpenAI
 
 from assetopsgym import AssetOpsGymEnv
-from assetopsgym.agent import (GUIDE, call_tool, report, tool_data,
-                               tool_text)
+from assetopsgym.agent import (GUIDE, begin, call_tool, report,
+                               tool_data, tool_text)
 from assetopsgym.profiling import Profiler
 
 NAME = "plan_execute"  # this agent, in profiles and rollouts.py
@@ -148,14 +148,12 @@ def run_rounds(env, backend: LLMBackend, model: str,
                agent: str) -> dict:
     """An episode on any AssetOpsBench backend; `agent` names it
     in the report."""
-    with prof.span("client.reset"):
-        reset = env.reset(variant=variant, seed=seed)
-    meta = reset.observation.metadata
-    prof.episode_id = meta.get("episode_id")
+    meta = begin(env, prof, variant, seed)
     s = Session(env, prof, describe(env.list_tools()),
                 meta["sim_time"])
     runner = PlanExecuteRunner(backend, {SERVER: s})
-    notes = "none yet."
+    notes, rounds = "none yet.", []
+    prof.meta["stopped"] = "round limit"  # unless the episode ends
     for n in range(1, max_rounds + 1):
         before = s.now
         question = ROUND.format(task=meta["instruction"],
@@ -167,9 +165,15 @@ def run_rounds(env, backend: LLMBackend, model: str,
             except ValueError as e:  # the plan did not parse
                 sp.set(error=str(e))
                 notes = f"Your last plan was rejected: {e}"
+                rounds.append({"round": n, "question": question,
+                               "rejected": str(e)})
                 continue
             sp.set(steps=len(out.plan.steps))
+        rounds.append({"round": n, "question": question,
+                       "plan": out.plan.raw, "answer": out.answer,
+                       "steps": [asdict(x) for x in out.trajectory]})
         if s.step is not None and s.step.done:
+            prof.meta["stopped"] = None
             break
         notes = (out.answer or "none.")[:MAX_NOTE_CHARS]
         if s.now == before:
@@ -177,7 +181,7 @@ def run_rounds(env, backend: LLMBackend, model: str,
     if s.step is None or not s.step.done:
         # out of rounds: score the state reached
         s.step = call_tool(env, prof, "finish", {})
-    return report(s.step, prof, model, agent)
+    return report(s.step, prof, model, agent, rounds)
 
 
 def make_client() -> OpenAI:
