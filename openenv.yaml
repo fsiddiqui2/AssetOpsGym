@@ -19,13 +19,16 @@ validation:
     verifier:
       kind: reward_channel
     # The agent's tool list, read by server/environment.py; boot fails if
-    # the registered tools differ. Not exposed: approve_workorder,
-    # assign_technician, close_workorder (planner and technicians are
-    # simulated) and the KPI/calendar tools (they read the wall clock).
+    # a name here is not a gym or AssetOpsBench tool. Not exposed:
+    # generate_work_order (create_work_order does it in one call),
+    # AssetOpsBench's approve_workorder and close_workorder (the planner
+    # and technicians are simulated) and its KPI/calendar tools (they
+    # read the wall clock).
     declared_tools: [current_time, advance_time, list_alerts, acknowledge_alert,
-                     shelve_alert, finish, sites, asset_ids, asset_detail, assets,
+                     suppress_alert, finish, sites, asset_ids, asset_detail, assets,
                      installed_sensors, measured_sensors, stream_extent, history, latest_reading, sensor_stats,
-                     sensor_coverage, list_workorders, get_workorder, get_failure_codes, generate_work_order,
-                     update_workorder, cancel_workorder, investigate]
+                     sensor_coverage, list_workorders, get_workorder, get_failure_codes, create_work_order,
+                     update_workorder, cancel_workorder, investigate, escalate, defer,
+                     assign_technician]
   types:
     tags: [industrial, maintenance, mcp, assetopsbench]

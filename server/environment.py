@@ -3,9 +3,11 @@
 The agent's MCP tools, all routed through step():
   * AssetOpsBench's IoT tools and WO read tools, proxied to real server
     processes reading this episode's CouchDB databases;
-  * the gym's: current_time, advance_time, finish, the alert tools, and
-    AssetOpsBench's WO writes (generate_work_order, update_workorder,
-    cancel_workorder) on the simulator, mirrored to CouchDB.
+  * the gym's: current_time, advance_time, finish, the alert tools,
+    and the work-order writes on the simulator, mirrored to CouchDB:
+    create_work_order, investigate, escalate, defer and
+    assign_technician, with AssetOpsBench's update_workorder and
+    cancel_workorder.
 
 The world is frozen between calls. advance_time is the only thing that
 moves the clock: the simulator runs, new telemetry is written to CouchDB
@@ -38,9 +40,10 @@ from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
                        WorkOrderUpdate)
 from . import ledger, mirror
 from .aob import AOBBridge, Couch
-from .scenarios import VARIANTS, reference_costs, score
+from .scenarios import (VARIANTS, event_references, event_score,
+                        reference_costs, score)
 from .alerts import MAX_SHELVE_H
-from .prompt import INSTRUCTION
+from .prompt import INSTRUCTION, crew_line
 from .maintenance import WorkOrder
 from .sim import Sim
 from .telemetry import ASSET, SITE
@@ -117,10 +120,10 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             """Mark an alert as seen, by its id (e.g. "AL17")."""
             return await asyncio.to_thread(env._locked, env._ack, alert_id)
 
-        async def shelve_alert(
+        async def suppress_alert(
                 rule: str,
                 hours: float) -> ShelveResult | ErrorResult:
-            """Hide new alerts of one rule (e.g.
+            """Shelve one rule: hide its new alerts (e.g.
             "low_condenser_water_flow") for 0.25-168 hours. The rule
             keeps evaluating; its alerts are recorded, not shown."""
             return await asyncio.to_thread(
@@ -135,9 +138,11 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             return await asyncio.to_thread(
                 env._locked, env._write, verb, apply)
 
-        gym = (current_time, advance_time, list_alerts,
-               acknowledge_alert, shelve_alert, finish,
-               *wo_write_tools(write))
+        # openenv.yaml picks which of the gym's tools the agent sees
+        gym = [fn for fn in (
+            current_time, advance_time, list_alerts,
+            acknowledge_alert, suppress_alert, finish,
+            *wo_write_tools(write)) if fn.__name__ in MANIFEST.tools]
         for fn in gym:
             mcp.tool(fn)
         super().__init__(mcp)
@@ -186,13 +191,17 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             with self.prof.span("couch.write_rows", rows=len(self.sim.history)):
                 mirror.write_rows(self.couch, self.sim.history)
             with self.prof.span("sim.reference_runs"):
-                reference_costs(v)  # warm the score's reference runs now, not at the last step
+                # warm the scores' reference runs now, not at the
+                # last step
+                reference_costs(v)
+                event_references(v)
         self._state = GymState(
             episode_id=episode_id, step_count=0, variant=v.id,
             seed=v.seed, sim_time=iso(self.sim.now))
         text = INSTRUCTION.format(site=SITE, asset=ASSET, now=iso(self.sim.now), end=iso(v.end),
                                   days=v.horizon_days, max_h=MAX_ADVANCE_H,
                                   max_shelve=MAX_SHELVE_H,
+                                  crew=crew_line(v.crew),
                                   history_start=iso(v.start - timedelta(days=v.history_days)))
         return Observation(done=False, reward=0.0, metadata={
             "instruction": text, "site": SITE, "asset": ASSET, "episode_id": episode_id,
@@ -365,6 +374,7 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             r = self.sim.result()
             reactive, best = reference_costs(self.sim.v)
             r = replace(r, score=score(self.sim.v, r.cost_total),
+                        event_score=event_score(self.sim.v, r),
                         end_reason=reason, reference_costs={
                             "reactive_practice": reactive,
                             "oracle": best})

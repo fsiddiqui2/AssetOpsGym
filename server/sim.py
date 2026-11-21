@@ -21,6 +21,12 @@ class Sim:
     def __init__(self, variant: Variant):
         self.v = variant
         self.rng = random.Random(variant.seed)
+        # its own stream: a chatter leaves the plant's noise as is
+        self.chatter_rng = random.Random(variant.seed * 104729 + 1)
+        if variant.chatter_rule not in (None, *alerts.RULE):
+            raise ValueError(
+                f"unknown chatter_rule {variant.chatter_rule!r}; "
+                f"one of {list(alerts.RULE)}")
         self.now = variant.start - timedelta(days=variant.history_days)
         self.fault = faults.Fault(variant.mode, variant.onset,
                                   variant.pf_days, variant.exponent,
@@ -53,9 +59,12 @@ class Sim:
         faults.inject_fault(self.fault, mode, onset, pf_days)
 
     def file_wo(self, code: str | None, priority: int = 3,
-                wonum: str | None = None) -> maintenance.WorkOrder:
-        return maintenance.file_wo(self.maint, self.book, self.v,
-                                   self.now, code, priority, wonum)
+                wonum: str | None = None,
+                description: str = "Service request",
+                notes: str | None = None) -> maintenance.WorkOrder:
+        return maintenance.file_wo(
+            self.maint, self.book, self.v, self.now, code, priority,
+            wonum, description, notes)
 
     def generate_work_order(
             self, description: str, asset_num: str, site_id: str,
@@ -86,6 +95,17 @@ class Sim:
             self.maint, self.book, self.v, self.now, subsystem,
             priority, notes)
 
+    def defer(self, wonum: str, hours: float,
+              reason: str | None = None) -> maintenance.WorkOrder:
+        return maintenance.defer(self.maint, self.book, self.v,
+                                 self.now, wonum, hours, reason)
+
+    def assign_technician(self, wonum: str,
+                          technician: str) -> maintenance.WorkOrder:
+        return maintenance.assign_technician(
+            self.maint, self.book, self.v, self.now, wonum,
+            technician)
+
     def cancel_workorder(self, wonum: str, site_id: str,
                          reason: str | None = None
                          ) -> maintenance.WorkOrder:
@@ -106,7 +126,8 @@ class Sim:
         return report.state(self.v, self.now, self.fault, self.maint)
 
     def kpis(self) -> KPIs:
-        return report.kpis(self.book, self.fault, self.maint, self.alerts)
+        return report.kpis(self.v, self.book, self.fault, self.maint,
+                           self.alerts)
 
     def result(self) -> EpisodeResult:
         return report.result(self.v, self.book, self.fault, self.maint,
@@ -120,6 +141,21 @@ class Sim:
         if self.done and not self.book.closed:
             ledger.close(self.book, self.now)
         return rows
+
+    def _chatter(self, t: datetime, values: dict,
+                 running: bool) -> str | None:
+        """Spike the chattering rule's sensor on a share of ticks;
+        returns the rule's name on those ticks."""
+        v = self.v
+        if v.chatter_rule is None:
+            return None
+        hit = self.chatter_rng.random() < v.chatter_per_day * TICK_H / 24
+        rule = alerts.RULE[v.chatter_rule]
+        if not (hit and running == rule.running
+                and faults.chattering(v, self.fault, t)):
+            return None
+        alerts.spike(rule, values)
+        return rule.name
 
     def _tick(self, t: datetime) -> TelemetryRow:
         f, events = self.fault, self.events
@@ -138,5 +174,6 @@ class Sim:
         values = telemetry.sample(self.plant, self.rng, t, running, f.mode,
                                   s, self.v.blips_per_day)
         ledger.energy(self.book, t, running, self.plant.excess_kw)
-        alerts.evaluate(self.bms, events, t, values, running)
+        alerts.evaluate(self.bms, events, t, values, running,
+                        self._chatter(t, values, running))
         return TelemetryRow(t, values)

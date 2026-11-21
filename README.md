@@ -9,13 +9,13 @@ An [OpenEnv](https://github.com/openenv/OpenEnv) environment where an LLM agent 
 - **Tools.**
   - AssetOpsBench IoT tools: `history`, `sensor_stats`, `latest_reading`, …
   - AssetOpsBench work-order reads: `get_workorder`, `list_workorders`, `get_failure_codes` (its WO server runs with `AOB_READONLY=1`).
-  - Gym tools (in-process): `current_time`, `advance_time`, `finish`, the alert tools `list_alerts`, `acknowledge_alert`, `shelve_alert`, AssetOpsBench's work-order writes `generate_work_order`, `update_workorder`, `cancel_workorder` (its names, arguments and result shape; `aob_source` left out), and the gym's own `investigate`. A wrong asset, an unknown failure code or an edit after the technician arrived comes back as `{"error", "error_code"}`.
+  - Gym tools (in-process): `current_time`, `advance_time`, `finish`, the alert tools `list_alerts`, `acknowledge_alert`, `suppress_alert`, and the work-order writes: `create_work_order` (one call, failure code optional), `investigate`, `escalate` (to priority 1), `defer` (visit later, target moves with it), `assign_technician` (instead of the planner's pick), and AssetOpsBench's `update_workorder` and `cancel_workorder` (its names, arguments and result shape). The gym also implements AssetOpsBench's `generate_work_order`; `openenv.yaml` leaves it out of the agent's list. A wrong asset, an unknown failure code or an edit after the technician arrived comes back as `{"error", "error_code"}`.
   - The list the agent sees is `declared_tools` in `openenv.yaml`; the environment refuses to boot if its tools differ.
 - **Faults.** One latent fault per faulty variant grows from its onset until the chiller trips. Its primary sensor:
   - condenser flow restriction: condenser water flow
   - refrigerant leak: evaporator approach
   - compressor wear: % loaded vs tonnage
-- **Alerts.** The building management system raises operator alarms (fixed threshold held 2–3 h, late; 7 rules, 2 of them from AssetOpsBench's chiller rules) and analytics alerts (rule metric 3σ above its own last 24 h; about 1.5 a day when healthy, 3.7 with blips; they carry no fault signal). The agent can acknowledge an alert or shelve a rule for up to 168 h; shelved alerts are recorded but hidden, so shelving the fault's rule hides its alarm.
+- **Alerts.** The building management system raises operator alarms (fixed threshold held 2–3 h, late; 7 rules, 2 of them from AssetOpsBench's chiller rules) and analytics alerts (rule metric 3σ above its own last 24 h; about 1.5 a day when healthy, 3.7 with blips; they carry no fault signal). The agent can acknowledge an alert or suppress (shelve) a rule for up to 168 h; shelved alerts are recorded but hidden, so shelving the fault's rule hides its alarm. A scenario can make one rule's transmitter chatter (`chatter_rule`, `chatter_per_day`, `chatter_start_day`, `chatter_end_day`): its reading spikes 15% past the alarm limit on that share of ticks and each spike raises an operator alarm at once, with no hold. `investigate("sensors")` finds the transmitter and a `CH-SENSOR` repair ends the chatter; neither is a false dispatch.
 - **Maintenance.** The planner approves the agent's work orders and a technician comes. Technicians may not show up, and the compressor job waits 48 h for parts. The technician does the work named by the failure code. `investigate(subsystem)` opens an inspection order instead: a visit that repairs nothing, leaves the chiller running, and reports the fault and its failure code only if the fault is in that subsystem and has grown past severity 0.15 (about where its primary sensor has moved 3σ). The work-order documents in CouchDB are a fold over the ledger's events, rewritten after every write and every `advance_time`; AssetOpsBench's WO server reads them.
 - **Ledger.** Every cost, downtime span, failure, alert and work-order transition is a typed event (`schemas.LedgerEvent`) in `Sim.events`; the score's totals and the proposal's five KPIs (downtime, missed failures, false dispatches, alert load, SLA breaches) are folds over it, as is the count of inspection visits, which are not false dispatches.
 - **Crew.** A scenario names its technicians, their skills and travel time. A job nobody on the crew can do waits 48 h for a contractor. Arriving later than the priority's response target is an SLA breach.
@@ -34,6 +34,12 @@ healthy: U = 1 − C_agent / (5 × dispatch cost)
 - `C_oracle` files the right work order at fault onset.
 - On healthy twins, doing nothing *is* the reference.
 
+### Seven-term score (logged, not the reward yet)
+
+Every result also carries `event_terms` and `event_score`: the scenario sheet's seven weighted event terms in downtime-hour equivalents (unplanned downtime 1 per hour, failure 24, false dispatch 4, acknowledgement 0.005, investigation 0.5, unaddressed fault 12, SLA breach 2), normalised so the threshold rule = 0 and the oracle = 1, clipped to [−1, 1], and capped at 0 after a failure. The two references are each variant's mean over the 20 development seeds (`scenarios.REFERENCE_SEEDS`); where they tie there is no score (`None`). The reward stays the dollar score until the team switches.
+
+Two rules in it are proposals, not yet agreed. A fault is unaddressed if it can fail inside the 60 days and no order for it was filed by the latest safe time: the last moment a priority-1 order still finishes before the trip on the planner's slowest approval and arrival. And a priority 1 or 2 visit for a fault that cannot fail inside the 60 days counts as a false dispatch. SLA breaches are charged as the KPI counts them, including ones the agent cannot avoid (a technician no-show, the contractor wait).
+
 ## Variants and admission anchors
 
 `uv run python -m assetopsgym.baselines`. `tests/test_anchors.py` enforces FDE-Gym's anchors: oracle ≥ 0.95, doing nothing = 0 on faulty variants, every shortcut ≤ 0.8.
@@ -47,6 +53,7 @@ healthy: U = 1 − C_agent / (5 × dispatch cost)
 | compwear_late | 0.00 | 1.00 | 0.83 | −1.00 | −0.24 | 0.45 | −0.09 |
 | healthy | 1.00 | 1.00 | 1.00 | −1.00 | −1.00 | −1.00 | −0.80 |
 | healthy_noisy | 1.00 | 1.00 | 1.00 | −1.00 | −1.00 | −1.00 | −0.80 |
+| healthy_chatter | 1.00 | 1.00 | 0.04 | −1.00 | −1.00 | −1.00 | −0.80 |
 
 First zero-shot run: `openai/gpt-5-mini` on `refleak_mid`, capped at 40 turns, scored **−0.04**. It made one false dispatch, the fault went undiagnosed, and the chiller tripped. LLM time was 149 s against 4.5 s in the environment, with 673k prompt tokens.
 
@@ -101,7 +108,7 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 | `server/variant.py` | `Variant` (the only scenario type; `from_dict` loads a table row), crew, the clock |
 | `server/telemetry.py` | sensors, load/weather, blips, the per-tick sample |
 | `server/faults.py` | failure codes, fault severity, the trip |
-| `server/alerts.py` | BMS rules, operator alarms, z-score analytics, ack/shelve |
+| `server/alerts.py` | BMS rules, operator alarms, z-score analytics, ack/shelve, chatter spikes |
 | `server/maintenance.py` | work orders, planner and technicians |
 | `server/ledger.py`, `server/report.py` | cost ledger; state, KPIs and result |
 | `server/scenarios.py` | variants, reference runs, score |
@@ -121,7 +128,7 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 Each line names its owner task on the team board.
 
 - **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise (`analysis/chiller6.md`), and Dhaval's MATLAB failure-mode list replaces our three modes.
-- **Alerts run in the gym's process**, not a separate MCP server. Acknowledge and shelve are free until T2 prices them; no chatter-rate knob yet (T7, d07).
+- **Alerts run in the gym's process**, not a separate MCP server. Acknowledge and shelve are free in the dollar score; the seven-term score prices acknowledgements.
 - **Cost priors are flat guesses**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
 - **Work-order edits** after the technician arrives are refused (`WORK_ORDER_LOCKED`). A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
 - **Each environment instance starts its own IoT and WO server processes** (about 10 s). The AssetOpsBench servers read their database names from the environment at start, so sharing one server pair across episodes needs a change upstream (T4, T11).

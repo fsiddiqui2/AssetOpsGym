@@ -8,34 +8,16 @@ threshold-plus-on-delay rule is the non-LLM baseline an agent has to beat.
 
 from __future__ import annotations
 
-from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
+from assetopsgym.server.scenarios import (RULE_CODE, VARIANTS,
+                                          do_nothing, oracle, run,
+                                          score, threshold_on_delay)
 from assetopsgym.server.faults import FAULT_MODES
 from assetopsgym.server.maintenance import status
 from assetopsgym.server.sim import Sim
 
-RULE_CODE = {
-    "low_condenser_water_flow": "CH-CWFLOW",
-    "high_evaporator_approach": "CH-REFLEAK",
-    "compressor_load_mismatch": "CH-COMPWEAR",
-}
-
-
 def _open_codes(sim: Sim) -> set:
     return {w.code for w in sim.wos.values()
             if status(w) in ("WAPPR", "APPR", "INPRG")}
-
-
-def threshold_on_delay(sim: Sim, check_hours: float = 24) -> None:
-    """Daily check; file a work order for each operator alarm that maps to a fault."""
-    seen, filed = 0, set()
-    while not sim.done:
-        sim.advance(check_hours)
-        for a in sim.alerts[seen:]:
-            code = RULE_CODE.get(a.rule)
-            if a.kind == "operator_alarm" and code and code not in filed:
-                sim.file_wo(code, priority=2)
-                filed.add(code)
-        seen = len(sim.alerts)
 
 
 def react_to_every_alert(sim: Sim, check_hours: float = 24) -> None:

@@ -6,6 +6,8 @@ Needs CouchDB (AssetOpsBench's docker compose) and an AssetOpsBench checkout wit
 
 import pytest
 import requests
+from openenv.core.env_server.mcp_types import (CallToolAction,
+                                               ListToolsAction)
 
 from assetopsgym.server.aob import AOB_DIR, Couch
 from assetopsgym.server.scenarios import VARIANTS
@@ -28,7 +30,6 @@ def env():
 
 
 def call(env, name, **args):
-    from openenv.core.env_server.mcp_types import CallToolAction
 
     obs = env.step(CallToolAction(tool_name=name, arguments=args))
     assert obs.error is None, obs.error
@@ -68,10 +69,12 @@ def test_oracle_through_the_wo_server_scores_one(env):
     while hours > 0:
         call(env, "advance_time", hours=min(168, hours))
         hours -= 168
-    wo, _ = call(env, "generate_work_order", description="Condenser flow dropping", asset_num="Chiller 6",
-                 site_id="MAIN", priority=2)
-    assert wo["work_order"]["reportdate"].startswith("2026-06-07")  # simulated, not wall-clock, time
-    call(env, "update_workorder", wonum=wo["wonum"], site_id="MAIN", failure_code="CH-CWFLOW")
+    wo, _ = call(env, "create_work_order",
+                 description="Condenser flow dropping",
+                 failure_code="CH-CWFLOW", priority=2)
+    # simulated, not wall-clock, time
+    assert wo["work_order"]["reportdate"].startswith("2026-06-07")
+    assert wo["work_order"]["failurecode"] == "CH-CWFLOW"
     _, obs = call(env, "finish")
     assert obs.done and obs.reward >= 0.95
     assert obs.metadata["result"]["failure_prevented"]
@@ -84,12 +87,14 @@ def test_gym_owns_the_work_order_writes(env):
               "assign_technician", "close_workorder"}
     assert "get_workorder" in aob and not aob & writes
     assert not set(env.proxied) & writes
+    assert "generate_work_order" not in {
+        t.name for t in env.step(ListToolsAction()).tools}
     env.reset(variant="healthy", seed=1)
-    bad, _ = call(env, "generate_work_order", description="x",
-                  asset_num="Chiller6", site_id="MAIN")
-    assert bad["error_code"] == "UNKNOWN_ASSET", bad
-    wo, _ = call(env, "generate_work_order", description="Check",
-                 asset_num="Chiller 6", site_id="MAIN", priority=1)
+    bad, _ = call(env, "create_work_order", description="x",
+                  failure_code="CH-NOPE")
+    assert bad["error_code"] == "UNKNOWN_FAILURE_CODE", bad
+    wo, _ = call(env, "create_work_order", description="Check",
+                 priority=1)
     filed = "2026-06-01T00:00:00+00:00"
     assert wo["status"] == "WAPPR"
     assert wo["work_order"]["reportdate"] == filed
@@ -120,11 +125,11 @@ def test_alert_tools(env):
     assert acked["id"] == alert["id"]
     left, _ = call(env, "list_alerts", unacked_only=True, limit=200)
     assert alert["id"] not in {a["id"] for a in left["alerts"]}
-    shelf, _ = call(env, "shelve_alert", rule=alert["rule"], hours=168)
+    shelf, _ = call(env, "suppress_alert", rule=alert["rule"], hours=168)
     assert shelf["rule"] == alert["rule"]
     out, _ = call(env, "advance_time", hours=168)
     assert alert["rule"] not in {a["rule"] for a in out["new_alerts"]}
-    bad, _ = call(env, "shelve_alert", rule="chiller_trip", hours=1)
+    bad, _ = call(env, "suppress_alert", rule="chiller_trip", hours=1)
     assert bad["error_code"] == "UNKNOWN_RULE", bad
 
 
@@ -155,3 +160,25 @@ def test_investigate_reports_through_the_work_order(env):
     wo = got["work_order"]
     assert wo["worktype"] == "INSP" and wo["failurecode"] is None
     assert "CH-REFLEAK" in wo["description_longdescription"]
+
+
+def test_escalate_defer_and_assign_through_the_tools(env):
+    obs = env.reset(variant="healthy", seed=1)
+    assert "TECH-01 (any repair, 0 h travel)" in \
+        obs.metadata["instruction"]
+    wo, _ = call(env, "create_work_order", description="Plan a "
+                 "cleaning", failure_code="CH-CWFLOW", priority=4)
+    num = wo["wonum"]
+    up, _ = call(env, "escalate", wonum=num)
+    assert up["work_order"]["wopriority"] == 1
+    for name, args in (("defer", {"hours": 48}),
+                       ("assign_technician",
+                        {"technician": "TECH-02"})):
+        done, _ = call(env, name, wonum=num, **args)
+        assert done["wonum"] == num, done
+    bad, _ = call(env, "assign_technician", wonum=num,
+                  technician="TECH-99")
+    assert bad["error_code"] == "NOT_FOUND" and "TECH-01" in bad["error"]
+    out, _ = call(env, "advance_time", hours=24)
+    assert any("TECH-02 scheduled" in u["note"]
+               for u in out["work_order_updates"])

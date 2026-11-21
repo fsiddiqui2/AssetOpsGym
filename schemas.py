@@ -130,6 +130,11 @@ class SimulatorAPI(Protocol):
         failure_code: Optional[str] = None): ...
     def cancel_workorder(self, wonum: str, site_id: str,
                          reason: Optional[str] = None): ...
+    def investigate(self, subsystem: str, priority: int = 3,
+                    notes: Optional[str] = None): ...
+    def defer(self, wonum: str, hours: float,
+              reason: Optional[str] = None): ...
+    def assign_technician(self, wonum: str, technician: str): ...
     def acknowledge(self, alert_id: str): ...
     def shelve(self, rule: str, hours: float) -> datetime: ...
     def state(self) -> SimState: ...
@@ -240,6 +245,37 @@ class KPIs:
 
 
 @dataclass(frozen=True, slots=True)
+class EventTerms:
+    """The seven event terms: an episode's counts, or the weight
+    of each (scenarios.WEIGHTS), in downtime-hour equivalents."""
+
+    unplanned_downtime_hours: float
+    missed_failures: float
+    false_dispatches: float  # mechanical visits nothing called for
+    acknowledgements: float
+    investigations: float
+    # a fault that can fail inside the horizon, with no order for
+    # it filed by the latest safe time
+    unaddressed_faults: float
+    sla_breaches: float
+
+
+@dataclass(frozen=True, slots=True)
+class EventScore:
+    """The seven-term score: threshold rule = 0, oracle = 1. Logged
+    beside `score`; not the reward until the team switches."""
+
+    cost: float  # the episode's terms, weighted
+    # the variant's mean cost over scenarios.REFERENCE_SEEDS
+    threshold_cost: float
+    oracle_cost: float
+    # (threshold - cost) / (threshold - oracle); None: no gap
+    raw: Optional[float]
+    # raw in [-1, 1], and at most 0 after a failure
+    score: Optional[float]
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeResult:
     variant: str
     mode: Optional[str]
@@ -257,10 +293,12 @@ class EpisodeResult:
     alerts: dict[AlertKind, int]
     kpis: KPIs
     events: int  # ledger length; the events themselves are in Sim.events
+    event_terms: EventTerms
     # set by the environment at the end of an episode
     score: Optional[float] = None  # [-1, 1]
     end_reason: Optional[str] = None
     reference_costs: Optional[dict[str, float]] = None
+    event_score: Optional[EventScore] = None
 
     def __post_init__(self):
         if abs(sum(self.cost_breakdown.values()) - self.cost_total) > 0.05:
