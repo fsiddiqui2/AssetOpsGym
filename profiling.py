@@ -183,6 +183,9 @@ class Profiler:
             "llm_calls": sum(1 for s in spans if s.name.startswith("llm.")),
             "tool_calls": sum(1 for s in spans if s.name in ("client.step", "env.step")),
             "prompt_tokens": int(prompt), "completion_tokens": int(completion),
+            # of prompt_tokens, on providers that report a cache
+            "cache_read_tokens": int(asum("cache_read_tokens")),
+            "cache_write_tokens": int(asum("cache_write_tokens")),
             "tokens_per_sim_hour": round(tokens / sim_hours, 1) if sim_hours else None,
             "tokens_per_llm_s": round(tokens / llm_s, 1) if llm_s else None,
         }

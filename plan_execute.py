@@ -138,14 +138,23 @@ def run_episode(env, llm: OpenAI, model: str,
                 prof: Profiler | None = None,
                 seed: int | None = None) -> dict:
     prof = prof or Profiler()
+    return run_rounds(env, EndpointLLM(llm, model, prof), model,
+                      variant, max_rounds, prof, seed, NAME)
+
+
+def run_rounds(env, backend: LLMBackend, model: str,
+               variant: str | None, max_rounds: int,
+               prof: Profiler, seed: int | None,
+               agent: str) -> dict:
+    """An episode on any AssetOpsBench backend; `agent` names it
+    in the report."""
     with prof.span("client.reset"):
         reset = env.reset(variant=variant, seed=seed)
     meta = reset.observation.metadata
     prof.episode_id = meta.get("episode_id")
     s = Session(env, prof, describe(env.list_tools()),
                 meta["sim_time"])
-    runner = PlanExecuteRunner(EndpointLLM(llm, model, prof),
-                               {SERVER: s})
+    runner = PlanExecuteRunner(backend, {SERVER: s})
     notes = "none yet."
     for n in range(1, max_rounds + 1):
         before = s.now
@@ -168,7 +177,12 @@ def run_episode(env, llm: OpenAI, model: str,
     if s.step is None or not s.step.done:
         # out of rounds: score the state reached
         s.step = call_tool(env, prof, "finish", {})
-    return report(s.step, prof, model, NAME)
+    return report(s.step, prof, model, agent)
+
+
+def make_client() -> OpenAI:
+    """OPENAI_BASE_URL and OPENAI_API_KEY pick the model server."""
+    return OpenAI()
 
 
 def main():
@@ -182,7 +196,7 @@ def main():
     with AssetOpsGymEnv(base_url=a.url,
                         message_timeout_s=300).sync() as env:
         print(json.dumps(run_episode(
-            env, OpenAI(), a.model, a.variant, a.max_rounds),
+            env, make_client(), a.model, a.variant, a.max_rounds),
             indent=2))
 
 

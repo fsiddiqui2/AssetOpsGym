@@ -26,6 +26,7 @@ from assetopsgym.profiling import Profiler
 NAME = "tool_loop"  # this agent, in profiles and rollouts.py
 DEFAULT_LIMIT = 60  # turns
 MAX_TOOL_CHARS = 6000
+NUDGE = "Keep going: use the tools, advance time, or call finish."
 GUIDE = ("Work like an engineer on shift: check the data, decide how far to advance time, and act on evidence. "
          "Tool results longer than a few thousand characters are cut off, so prefer sensor_stats over a time "
          "window, and pass sensors and a small limit to history.")
@@ -88,7 +89,7 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
             nudges += 1
             if nudges > 2:
                 break
-            messages.append({"role": "user", "content": "Keep going: use the tools, advance time, or call finish."})
+            messages.append({"role": "user", "content": NUDGE})
             continue
         for tc in msg.tool_calls:
             try:
@@ -127,6 +128,11 @@ def report(step, prof: Profiler, model: str, agent: str) -> dict:
             "profile": profile, "server_profile": result.get("profile")}
 
 
+def make_client() -> OpenAI:
+    """OPENAI_BASE_URL and OPENAI_API_KEY pick the model server."""
+    return OpenAI()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--url", default="http://localhost:8000")
@@ -135,7 +141,7 @@ def main():
     p.add_argument("--max-turns", type=int, default=DEFAULT_LIMIT)
     a = p.parse_args()
     with AssetOpsGymEnv(base_url=a.url, message_timeout_s=300).sync() as env:
-        print(json.dumps(run_episode(env, OpenAI(), a.model, a.variant, a.max_turns), indent=2))
+        print(json.dumps(run_episode(env, make_client(), a.model, a.variant, a.max_turns), indent=2))
 
 
 if __name__ == "__main__":

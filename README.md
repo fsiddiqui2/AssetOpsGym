@@ -86,6 +86,7 @@ uv run server                                  # OpenEnv server on :8000 (PORT t
 OPENAI_BASE_URL=https://api.tokenrouter.com/v1 OPENAI_API_KEY=... \
   uv run python -m assetopsgym.agent --variant refleak_mid
 mise run plan-execute -- --variant refleak_mid --model Qwen/Qwen2.5-3B-Instruct   # AssetOpsBench's Plan-Execute agent
+mise run claude-agent -- --variant rl_fast.base   # either agent on Claude: claude-agent, claude-plan-execute
 infra/serve.sh                                 # vLLM on :8001 (GPU box); agent: OPENAI_BASE_URL=http://localhost:8001/v1
 infra/mlx.sh                                   # or Qwen3-8B 4-bit on :8001 on an Apple-silicon laptop; --model mlx-community/Qwen3-8B-4bit
 uv run openenv validate . --level static       # manifest check
@@ -134,7 +135,8 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 | `server/mirror.py` | CouchDB as a mirror: asset and failure-code catalogs, telemetry rows, WO documents folded from the events |
 | `server/prompt.py` | the agent's instruction |
 | `server/app.py`, `client.py`, `openenv.yaml` | OpenEnv packaging |
-| `rollouts.py` | runs many episodes at once for either agent (`--envs` sessions, `--episodes`, seeds from `--seed0`) and reports rollouts per hour and per GPU-hour; the server needs `MAX_CONCURRENT_ENVS` ≥ `--envs` |
+| `claude_agent.py`, `claude_plan_execute.py` | the same two agents on Claude's Messages API (`uv sync --extra claude`; `ANTHROPIC_API_KEY` or an `ant auth login` profile; default model `claude-opus-5-5`). The tool loop caches its conversation prefix. No fallback model: a refusal ends the episode |
+| `rollouts.py` | runs many episodes at once for any agent (`--envs` sessions, `--episodes`, seeds from `--seed0`) and reports rollouts per hour and per GPU-hour; the server needs `MAX_CONCURRENT_ENVS` ≥ `--envs` |
 | `baselines.py`, `tests/` | reference policies, anchors, integration tests |
 | `agent.py` | zero-shot agent over any OpenAI-compatible endpoint (TokenRouter, vLLM): a tool-calling loop that keeps the whole conversation |
 | `plan_execute.py` | AssetOpsBench's Plan-Execute agent, zero-shot, one run per decision round: each round plans, executes and ends in `advance_time`; the previous round's answer is carried as notes. Runs in AssetOpsBench's environment (`mise run plan-execute`); its code is unchanged |

@@ -8,8 +8,8 @@
 AssetOpsBench server pair) and take episodes from a shared
 queue; episode i runs variant i mod V with seed
 seed0 + i div V. Every episode still emits its own profile;
-this adds the batch line. For --agent plan_execute run it
-in AssetOpsBench's environment (see plan_execute.py).
+this adds the batch line. Run the plan-execute agents in
+AssetOpsBench's environment (see plan_execute.py).
 
 GPU-hours are this host's GPUs times the wall time, so run
 it on the vLLM host; elsewhere only rollouts per hour is
@@ -30,9 +30,12 @@ from typing import Any, Callable, ContextManager
 from assetopsgym.profiling import (GPUSampler, Profiler, flatten,
                                    wandb_run)
 
-# agent name -> its module (run_episode, NAME, DEFAULT_LIMIT)
+# agent name -> its module (run_episode, make_client, NAME,
+# DEFAULT_LIMIT). The claude_ ones run on Claude's Messages API.
 AGENTS = {"tool_loop": "assetopsgym.agent",
-          "plan_execute": "assetopsgym.plan_execute"}
+          "plan_execute": "assetopsgym.plan_execute",
+          "claude_tool_loop": "assetopsgym.claude_agent",
+          "claude_plan_execute": "assetopsgym.claude_plan_execute"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,18 +130,16 @@ def main():
     p.add_argument("--variant", nargs="*", default=[None])
     p.add_argument("--seed0", type=int, default=1000)
     p.add_argument("--limit", type=int, default=None,
-                   help="turns (tool_loop) or rounds (plan_execute)")
+                   help="turns (tool loops) or rounds (plan-execute)")
     p.add_argument("--url", default="http://localhost:8000")
     a = p.parse_args()
-
-    from openai import OpenAI
 
     from assetopsgym import AssetOpsGymEnv
     mod = importlib.import_module(AGENTS[a.agent])
     if mod.NAME != a.agent:
         raise RuntimeError(f"{AGENTS[a.agent]} is {mod.NAME!r}")
     limit = a.limit or mod.DEFAULT_LIMIT
-    llm = OpenAI()
+    llm = mod.make_client()
 
     def open_env():
         return AssetOpsGymEnv(base_url=a.url,

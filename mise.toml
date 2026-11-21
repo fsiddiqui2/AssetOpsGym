@@ -26,6 +26,14 @@ run = "uv run python -m assetopsgym.agent"
 description = "AssetOpsBench Plan-Execute agent, in its environment; needs --model"
 run = "uv run --no-sync --project ${AOB_DIR:-../AssetOpsBench} --with-editable '.[profile]' python -P -m assetopsgym.plan_execute"
 
+[tasks.claude-agent]
+description = "the tool loop on Claude (ANTHROPIC_API_KEY or `ant auth login`)"
+run = "uv run --extra claude python -m assetopsgym.claude_agent"
+
+[tasks.claude-plan-execute]
+description = "Plan-Execute on Claude, in AssetOpsBench's environment"
+run = "uv run --no-sync --project ${AOB_DIR:-../AssetOpsBench} --with-editable '.[claude,profile]' python -P -m assetopsgym.claude_plan_execute"
+
 [tasks.rollouts]
 description = "N episodes at once, rollouts per GPU-hour; needs --agent --model --episodes"
 run = "uv run python -m assetopsgym.rollouts"
