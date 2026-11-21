@@ -1,14 +1,14 @@
-"""Reference policies on the pure simulator, and the admission-anchor table.
+"""Scripted policies on the pure simulator, and the suite's table.
 
-    uv run python -m assetopsgym.baselines
+    uv run python -m assetopsgym.baselines     # about 3 minutes
 
 Shortcut policies are the strategies FDE-Gym requires to score at most 0.8. The
-threshold-plus-on-delay rule is the non-LLM baseline an agent has to beat.
+threshold rule and the oracle (server/scenarios.py) are the score's 0 and 1.
 """
 
 from __future__ import annotations
 
-from assetopsgym.server.scenarios import (RULE_CODE, VARIANTS,
+from assetopsgym.server.scenarios import (RULE_CODE, SUITE,
                                           do_nothing, oracle, run,
                                           score, threshold_on_delay)
 from assetopsgym.server.faults import FAULT_MODES
@@ -60,14 +60,14 @@ POLICIES = {"do_nothing": do_nothing, "oracle": oracle, "threshold_on_delay": th
 
 
 def table() -> dict[str, dict[str, float]]:
-    return {vid: {name: score(v, run(v, p).cost_total)
-                  for name, p in POLICIES.items()}
-            for vid, v in VARIANTS.items()}
+    return {v.id: {name: score(v, run(v, p)).score
+                   for name, p in POLICIES.items()}
+            for v in SUITE}
 
 
 if __name__ == "__main__":
     t = table()
     names = list(POLICIES)
-    print(f"{'variant':16s}" + "".join(f"{n[:14]:>15s}" for n in names))
+    print(f"{'variant':28s}" + "".join(f"{n[:14]:>15s}" for n in names))
     for vid, row in t.items():
-        print(f"{vid:16s}" + "".join(f"{row[n]:15.3f}" for n in names))
+        print(f"{vid:28s}" + "".join(f"{row[n]:15.3f}" for n in names))

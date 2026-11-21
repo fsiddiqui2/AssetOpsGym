@@ -65,6 +65,11 @@ class Variant:
         return self.start + timedelta(days=self.horizon_days)
 
     @property
+    def scenario(self) -> str:
+        """`cf_fast` of `cf_fast.pf6`; a lone variant is its own."""
+        return self.id.partition(".")[0]
+
+    @property
     def scoring(self) -> Literal["faulty", "healthy"]:
         return "faulty" if self.mode else "healthy"
 

@@ -15,7 +15,7 @@ from assetopsgym.server.sim import Sim
 from assetopsgym.server.variant import Technician
 
 QUIET = replace(VARIANTS["healthy"], noshow=0.0)
-CHATTER = replace(VARIANTS["healthy_chatter"], noshow=0.0)
+CHATTER = replace(VARIANTS["healthy_chatter.base"], noshow=0.0)
 
 
 def approved(sim: Sim, code: str, priority: int):
@@ -113,8 +113,9 @@ def test_inspecting_and_repairing_the_transmitter():
     sim = Sim(CHATTER)
     sim.advance(24 * 4)
     look = sim.investigate("sensors", priority=1)
+    sim.advance(24)  # the inspection first, then the repair
     fix = sim.file_wo("CH-SENSOR", priority=1)
-    sim.advance(48)
+    sim.advance(24)
     notes = {e.wonum: e.note for e in sim.events
              if e.type == "service_request"}
     assert "faulty transmitter" in notes[look.wonum]

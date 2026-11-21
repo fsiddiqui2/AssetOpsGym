@@ -9,8 +9,7 @@ import pytest
 
 from assetopsgym.schemas import (AlertEvent, CostEvent, ErrorCode,
                                  ErrorResult, GymError)
-from assetopsgym.server.scenarios import VARIANTS, do_nothing, oracle, run, score
-from assetopsgym.server.faults import FAULT_MODES
+from assetopsgym.server.scenarios import VARIANTS
 from assetopsgym.server.ledger import fetch
 from assetopsgym.server.maintenance import CONTRACTOR_DELAY_H
 from assetopsgym.server.sim import Sim
@@ -112,11 +111,3 @@ def run_one(v):
     wo = sim.file_wo("CH-COMPWEAR", priority=2)
     sim.run_to_end()
     return wo
-
-
-def test_default_crew_leaves_reference_scores_alone():
-    for v in VARIANTS.values():
-        nothing = score(v, run(v, do_nothing).cost_total)
-        assert nothing == (0.0 if v.mode else 1.0)
-        assert score(v, run(v, oracle).cost_total) >= 0.95
-        assert all(m in FAULT_MODES for m in [v.mode] if m)

@@ -19,43 +19,59 @@ An [OpenEnv](https://github.com/openenv/OpenEnv) environment where an LLM agent 
 - **Maintenance.** The planner approves the agent's work orders and a technician comes. Technicians may not show up, and the compressor job waits 48 h for parts. The technician does the work named by the failure code. `investigate(subsystem)` opens an inspection order instead: a visit that repairs nothing, leaves the chiller running, and reports the fault and its failure code only if the fault is in that subsystem and has grown past severity 0.15 (about where its primary sensor has moved 3σ). The work-order documents in CouchDB are a fold over the ledger's events, rewritten after every write and every `advance_time`; AssetOpsBench's WO server reads them.
 - **Ledger.** Every cost, downtime span, failure, alert and work-order transition is a typed event (`schemas.LedgerEvent`) in `Sim.events`; the score's totals and the proposal's five KPIs (downtime, missed failures, false dispatches, alert load, SLA breaches) are folds over it, as is the count of inspection visits, which are not false dispatches.
 - **Crew.** A scenario names its technicians, their skills and travel time. A job nobody on the crew can do waits 48 h for a contractor. Arriving later than the priority's response target is an SLA breach.
-- **Ending.** At day 60 or on `finish()`, the final `step()` observation carries `reward` = score and `metadata.result`, which has costs, failure prevented, false dispatches, detection delay and the KPIs.
+- **Ending.** At day 60 or on `finish()`, the final `step()` observation carries `reward` = score and `metadata.result`, which has the score's terms and references, costs, failure prevented, false dispatches, detection delay and the KPIs.
 
 ## Score
 
-KPI = total cost: dispatches, repairs (×2 if the chiller has already tripped), planned and unplanned downtime, and the extra energy a degraded chiller draws.
+The score is the scenario sheet's seven weighted event terms, in downtime-hour equivalents:
+
+| term | weight |
+|---|---|
+| unplanned downtime | 1 per hour |
+| failure (the chiller trips) | 24 |
+| false dispatch (a mechanical visit nothing called for) | 4 |
+| acknowledgement | 0.005 |
+| investigation (an inspection visit) | 0.5 |
+| unaddressed fault | 12 |
+| SLA breach the agent could have prevented | 2 |
 
 ```
-faulty:  U = (C_reactive − C_agent) / (C_reactive − C_oracle)     clipped to [−1, 1]
-healthy: U = 1 − C_agent / (5 × dispatch cost)
+S = (C_threshold − C_agent) / (C_threshold − C_oracle)     clipped to [−1, 1], at most 0 after a failure
+S = 1 − (C_agent − C_oracle) / 20                          where the two references tie
 ```
 
-- `C_reactive` is the plant's current practice: do nothing; a trip gets an emergency work order.
-- `C_oracle` files the right work order at fault onset.
-- On healthy twins, doing nothing *is* the reference.
+- `C_threshold` is the plant's alarm-driven practice: a daily check that files a work order for each operator alarm that maps to a fault. It is the score's zero.
+- `C_oracle` files the right work order at fault onset (as planned work, if the fault cannot fail inside the 60 days). It is the score's one.
+- Both are the variant's means over the 20 development seeds (`scenarios.REFERENCE_SEEDS`, 1000–1019), so a variant where the threshold rule is late in only some seeds still has a gap. The test seeds are 2000–2019.
+- The references tie on a healthy chiller, and on a fault the alarm catches in time; there, 20 units of cost (five false dispatches) is a score of 0.
+- A fault is unaddressed if it can fail inside the 60 days and no order for it was filed between its onset and the latest safe time: the last moment a priority-1 order still finishes before the trip, on the planner's slowest approval and arrival.
+- A priority 1 or 2 visit for a fault that cannot fail inside the 60 days counts as a false dispatch.
+- An SLA breach is charged only if the visit was late even without the technician's no-shows and without the contractor wait when nobody on the crew has the skill. In today's simulator that leaves almost nothing to charge: technicians are never busy, so the only late arrivals the agent causes are from assigning a technician without the skill.
 
-### Seven-term score (logged, not the reward yet)
+Every result carries `event_terms` (the seven counts) and `event_score` (the cost, both references and the score). The dollar ledger (`cost_total`, `cost_breakdown`) and the KPIs are still logged; they are not the score.
 
-Every result also carries `event_terms` and `event_score`: the scenario sheet's seven weighted event terms in downtime-hour equivalents (unplanned downtime 1 per hour, failure 24, false dispatch 4, acknowledgement 0.005, investigation 0.5, unaddressed fault 12, SLA breach 2), normalised so the threshold rule = 0 and the oracle = 1, clipped to [−1, 1], and capped at 0 after a failure. The two references are each variant's mean over the 20 development seeds (`scenarios.REFERENCE_SEEDS`); where they tie there is no score (`None`). The reward stays the dollar score until the team switches.
+## Scenarios and anchors
 
-Two rules in it are proposals, not yet agreed. A fault is unaddressed if it can fail inside the 60 days and no order for it was filed by the latest safe time: the last moment a priority-1 order still finishes before the trip on the planner's slowest approval and arrival. And a priority 1 or 2 visit for a fault that cannot fail inside the 60 days counts as a false dispatch. SLA breaches are charged as the KPI counts them, including ones the agent cannot avoid (a technician no-show, the contractor wait).
+The suite (`scenarios.SUITE`) is ten scenarios of three or four variants, each variant one changed setting from its scenario's base, named `<scenario>.<variant>`. `reset()` without a variant draws from it. The seven older variants (`scenarios.DEV`: `refleak_mid`, `healthy`, ...) stay for tests and quick runs and are not in the suite.
 
-## Variants and admission anchors
+`uv run python -m assetopsgym.baselines` prints every suite variant (about 3 minutes). `tests/test_anchors.py` enforces the anchors on each base variant: the oracle scores 1; doing nothing scores at most 0 where the fault can fail and 1 elsewhere; every shortcut scores at most 0.8. Scores below are on each base variant's own seed, so the threshold rule's column is near 0 rather than exactly 0.
 
-`uv run python -m assetopsgym.baselines`. `tests/test_anchors.py` enforces FDE-Gym's anchors: oracle ≥ 0.95, doing nothing = 0 on faulty variants, every shortcut ≤ 0.8.
+| scenario (base) | what it tests | threshold cost | do nothing | oracle | threshold rule | react to every alert | shotgun day 1 | weekly rotation | weekly no-code |
+|---|---|---|---|---|---|---|---|---|---|
+| cf_fast | a fast flow restriction, before the alarm | 42.5 | −0.13 | 1.00 | −0.02 | −1.00 | −0.32 | 0.44 | −0.98 |
+| rl_fast | a fast leak | 50.0 | −0.04 | 1.00 | −0.04 | −1.00 | −0.20 | −0.52 | −0.76 |
+| cw_parts_wait | compressor wear, 48 h parts wait | 69.9 | −0.49 | 1.00 | 0.00 | −1.00 | −0.60 | 0.66 | −1.00 |
+| rl_no_skill | a leak nobody on the crew repairs | 48.9 | −1.00 | 1.00 | −0.06 | −1.00 | −1.00 | 0.51 | −1.00 |
+| rl_masked_by_blips | a leak among sensor glitches | 49.3 | −0.06 | 1.00 | −0.06 | −1.00 | −0.22 | 0.51 | −0.79 |
+| cf_noshow | technicians that may not come | 25.4 | −0.89 | 1.00 | −0.23 | −1.00 | −1.00 | 0.05 | −1.00 |
+| cf_remote_crew | a crew 12 h away | 9.6 | −1.00 | 1.00 | 1.00 | −1.00 | −1.00 | −1.00 | −1.00 |
+| cf_incipient_defer | a fault too slow to fail in 60 days | 2.8 | 1.00 | 1.00 | −0.43 | −1.00 | −1.00 | −1.00 | −1.00 |
+| healthy_quiet | a healthy chiller | 0.0 | 1.00 | 1.00 | 1.00 | −1.00 | 0.40 | −0.80 | −0.80 |
+| healthy_chatter | a healthy chiller, one alarm chattering | 4.0 | 1.00 | 1.00 | 0.00 | −1.00 | −1.00 | −1.00 | −1.00 |
 
-| variant | do nothing | oracle | threshold + on-delay | react to every alert | shotgun day 1 | weekly rotation | weekly no-code |
-|---|---|---|---|---|---|---|---|
-| cwflow_early | 0.00 | 1.00 | 0.89 | −1.00 | −1.00 | −1.00 | −0.50 |
-| cwflow_noshow | 0.00 | 1.00 | 0.92 | −1.00 | −1.00 | −1.00 | −0.53 |
-| refleak_mid | 0.00 | 1.00 | 0.97 | −1.00 | −1.00 | −1.00 | −0.40 |
-| refleak_fast | 0.00 | 1.00 | 0.72 | −1.00 | −1.00 | −1.00 | −0.41 |
-| compwear_late | 0.00 | 1.00 | 0.83 | −1.00 | −0.24 | 0.45 | −0.09 |
-| healthy | 1.00 | 1.00 | 1.00 | −1.00 | −1.00 | −1.00 | −0.80 |
-| healthy_noisy | 1.00 | 1.00 | 1.00 | −1.00 | −1.00 | −1.00 | −0.80 |
-| healthy_chatter | 1.00 | 1.00 | 0.04 | −1.00 | −1.00 | −1.00 | −0.80 |
+Known gap: a policy that inspects the three fault subsystems on a schedule and files what the technician finds scores 0.81 on `cw_parts_wait` (weekly) and 0.84 on `cw_parts_wait.pf26` (fortnightly), just over the 0.8 bound, because an inspection costs 0.5. It is not among the seven scripted policies.
 
-First zero-shot run: `openai/gpt-5-mini` on `refleak_mid`, capped at 40 turns, scored **−0.04**. It made one false dispatch, the fault went undiagnosed, and the chiller tripped. LLM time was 149 s against 4.5 s in the environment, with 673k prompt tokens.
+First zero-shot run, under the earlier dollar score: `openai/gpt-5-mini` on `refleak_mid`, capped at 40 turns, scored −0.04. It made one false dispatch, the fault went undiagnosed, and the chiller tripped. LLM time was 149 s against 4.5 s in the environment, with 673k prompt tokens.
 
 ## Run it
 
@@ -128,8 +144,8 @@ Add a stage with `with env.prof.span("sim.something", rows=n): ...`; names are d
 Each line names its owner task on the team board.
 
 - **One asset, one fault per episode**; telemetry is a hand-tuned model (T5, T6). The repo's Chiller 6 data is noise (`analysis/chiller6.md`), and Dhaval's MATLAB failure-mode list replaces our three modes.
-- **Alerts run in the gym's process**, not a separate MCP server. Acknowledge and shelve are free in the dollar score; the seven-term score prices acknowledgements.
-- **Cost priors are flat guesses**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
+- **Alerts run in the gym's process**, not a separate MCP server. Shelving is free; an acknowledgement costs 0.005.
+- **The score's weights are the scenario sheet's provisional ones**, not swept (T2). The SLA target (priority response time plus 4 h grace) and the 48 h contractor delay for a skill the crew lacks are flat too.
 - **Work-order edits** after the technician arrives are refused (`WORK_ORDER_LOCKED`). A no-code request gets an inspection that never finds anything. Technicians are never busy on another job (T8).
 - **Each environment instance starts its own IoT and WO server processes** (about 10 s). The AssetOpsBench servers read their database names from the environment at start, so sharing one server pair across episodes needs a change upstream (T4, T11).
 - **Wall-clock audit (T4).** The gym writes work orders itself, in simulated time. Of the AssetOpsBench tools it exposes, only `latest_reading` (age) reads the real clock, and the gym rewrites it to simulated time. The other clock readers in the WO server (KPIs, calendar) are deliberately not exposed; its writes are hidden by `AOB_READONLY=1`.

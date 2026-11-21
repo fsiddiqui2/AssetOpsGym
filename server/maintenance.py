@@ -65,6 +65,7 @@ class WorkOrder:
     location: str | None = None
     inspect: str | None = None  # the subsystem investigate() named
     defer_h: float = 0.0  # the agent pushed the visit this much later
+    noshows: int = 0  # times the technician did not turn up
     emergency: bool = False
     canceled: bool = False
     approve_at: datetime | None = None
@@ -325,6 +326,7 @@ def _approve(m: Maintenance, l: Ledger, f: Fault, v: Variant,
 def _arrive(m: Maintenance, l: Ledger, f: Fault, v: Variant,
             wo: WorkOrder, t: datetime) -> None:
     if not wo.emergency and wo.rng.random() < v.noshow:
+        wo.noshows += 1
         wo.arrive_at += timedelta(hours=NOSHOW_DELAY_H)
         _push(m, wo, Action.ARRIVE, wo.arrive_at)
         _event(l, t, wo, "planner", "Technician did not arrive; "

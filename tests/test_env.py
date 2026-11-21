@@ -54,7 +54,11 @@ def test_do_nothing_scores_zero(env):
         _, obs = call(env, "advance_time", hours=168)
         if obs.done:
             break
-    assert obs.reward == 0.0 and obs.metadata["result"]["failed"]
+    result = obs.metadata["result"]
+    assert obs.reward <= 0 and result["failed"]
+    scored = result["event_score"]
+    assert scored["score"] == obs.reward == result["score"]
+    assert scored["cost"] > scored["threshold_cost"] > 0
     for name, args in (("advance_time", {"hours": 1}),
                        ("history", {"site_name": "MAIN",
                                     "asset_id": "Chiller 6"})):

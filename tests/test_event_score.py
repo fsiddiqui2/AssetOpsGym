@@ -1,5 +1,4 @@
-"""The seven-term cost and its score (logged, not the reward).
-Pure."""
+"""The seven-term cost and the score built on it. Pure."""
 
 from dataclasses import replace
 from datetime import timedelta
@@ -8,9 +7,9 @@ import pytest
 
 from assetopsgym.server import scenarios
 from assetopsgym.server.maintenance import latest_safe_filing
-from assetopsgym.server.scenarios import (VARIANTS, do_nothing,
-                                          event_cost, event_score,
-                                          oracle, run,
+from assetopsgym.server.scenarios import (TIE_SCALE, VARIANTS,
+                                          do_nothing, event_cost,
+                                          oracle, run, score,
                                           threshold_on_delay)
 from assetopsgym.server.sim import Sim
 from assetopsgym.server.variant import Variant
@@ -25,9 +24,9 @@ SLOW = Variant("slow", "CH-CWFLOW", onset_day=20, pf_days=45,
 def four_seeds(monkeypatch):
     monkeypatch.setattr(scenarios, "REFERENCE_SEEDS",
                         range(1000, 1004))
-    scenarios._event_references.cache_clear()
+    scenarios._references.cache_clear()
     yield scenarios.REFERENCE_SEEDS
-    scenarios._event_references.cache_clear()
+    scenarios._references.cache_clear()
 
 
 def test_doing_nothing_pays_downtime_failure_and_no_response():
@@ -87,23 +86,43 @@ def test_acknowledgements_and_inspections_are_charged():
 
 def test_threshold_is_zero_and_the_oracle_one(four_seeds):
     def mean_raw(policy):
-        return sum(event_score(LEAK, run(replace(LEAK, seed=s),
-                                         policy)).raw
+        return sum(score(LEAK, run(replace(LEAK, seed=s),
+                                   policy)).raw
                    for s in four_seeds) / len(four_seeds)
     assert mean_raw(threshold_on_delay) == pytest.approx(0, abs=1e-3)
     assert mean_raw(oracle) == pytest.approx(1, abs=1e-3)
-    nothing = event_score(LEAK, run(LEAK, do_nothing))
+    nothing = score(LEAK, run(LEAK, do_nothing))
     assert nothing.raw < 0 and nothing.score <= 0
 
 
-def test_a_failure_caps_the_score_and_a_tie_has_none(four_seeds):
+def test_a_failure_caps_the_score_and_a_tie_is_graded(four_seeds):
     # late, but before the threshold rule would be: fails, cheaply
     trip = LEAK.onset + timedelta(days=LEAK.pf_days)
     r = filed_at(LEAK, trip - timedelta(hours=20), 1).result()
-    s = event_score(LEAK, r)
+    s = score(LEAK, r)
     assert r.failed and s.raw > 0 and s.score == 0
-    healthy = VARIANTS["healthy"]
-    tie = event_score(healthy, run(healthy, do_nothing))
-    assert tie.raw is None and tie.score is None and tie.cost == 0
-    chatter = VARIANTS["healthy_chatter"]  # the rule dispatches
-    assert event_score(chatter, run(chatter, do_nothing)).score == 1
+    healthy = replace(VARIANTS["healthy"], noshow=0.0)
+    tie = score(healthy, run(healthy, do_nothing))
+    assert tie.raw is None and tie.score == 1 and tie.cost == 0
+    sim = Sim(healthy)  # one visit nothing called for
+    sim.file_wo("CH-CWFLOW", priority=1)
+    sim.run_to_end()
+    one = score(healthy, sim.result())
+    assert one.raw is None and one.score == 1 - 4 / TIE_SCALE
+    chatter = VARIANTS["healthy_chatter.base"]  # the rule dispatches
+    assert score(chatter, run(chatter, do_nothing)).score == 1
+
+
+def test_only_breaches_the_agent_could_prevent_are_charged():
+    noshow = replace(VARIANTS["healthy"], noshow=1.0)
+    sim = Sim(noshow)
+    wo = sim.file_wo("CH-SENSOR", priority=3)
+    sim.advance(24 * 10)  # never arrives: nothing to charge yet
+    assert sim.result().event_terms.sla_breaches == 0
+    late = Sim(replace(noshow, noshow=0.5, seed=3))
+    orders = [late.file_wo("CH-SENSOR", priority=1) for _ in range(6)]
+    late.run_to_end()
+    assert any(w.sla_breach for w in orders)  # the KPI counts them
+    assert late.result().kpis.sla_breaches > 0
+    assert late.result().event_terms.sla_breaches == 0
+    assert wo.noshows > 1

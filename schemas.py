@@ -233,7 +233,9 @@ LedgerEvent = Union[CostEvent, DowntimeEvent, FailureEvent,
 
 @dataclass(frozen=True, slots=True)
 class KPIs:
-    """The proposal's five KPIs, each a fold over the ledger. Logged beside the score, not in it."""
+    """The proposal's five KPIs and the inspection visits, each
+    a fold over the ledger, as the plant would count them. The
+    score's own counts are EventTerms."""
 
     downtime_hours: float
     missed_failures: int
@@ -257,22 +259,25 @@ class EventTerms:
     # a fault that can fail inside the horizon, with no order for
     # it filed by the latest safe time
     unaddressed_faults: float
+    # late arrivals the agent could have prevented: not a
+    # technician's no-show, nor a contractor wait the crew forced
     sla_breaches: float
 
 
 @dataclass(frozen=True, slots=True)
 class EventScore:
-    """The seven-term score: threshold rule = 0, oracle = 1. Logged
-    beside `score`; not the reward until the team switches."""
+    """The score and what it was computed from: threshold rule =
+    0, oracle = 1 (scenarios.score)."""
 
     cost: float  # the episode's terms, weighted
     # the variant's mean cost over scenarios.REFERENCE_SEEDS
     threshold_cost: float
     oracle_cost: float
-    # (threshold - cost) / (threshold - oracle); None: no gap
+    # (threshold - cost) / (threshold - oracle); None: they tie,
+    # and the score is 1 - (cost - oracle) / TIE_SCALE instead
     raw: Optional[float]
-    # raw in [-1, 1], and at most 0 after a failure
-    score: Optional[float]
+    # in [-1, 1], and at most 0 after a failure
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,9 +300,8 @@ class EpisodeResult:
     events: int  # ledger length; the events themselves are in Sim.events
     event_terms: EventTerms
     # set by the environment at the end of an episode
-    score: Optional[float] = None  # [-1, 1]
+    score: Optional[float] = None  # [-1, 1]; event_score.score
     end_reason: Optional[str] = None
-    reference_costs: Optional[dict[str, float]] = None
     event_score: Optional[EventScore] = None
 
     def __post_init__(self):

@@ -40,8 +40,7 @@ from ..schemas import (AckResult, AdvanceTimeResult, AlertKind,
                        WorkOrderUpdate)
 from . import ledger, mirror
 from .aob import AOBBridge, Couch
-from .scenarios import (VARIANTS, event_references, event_score,
-                        reference_costs, score)
+from .scenarios import SUITE, VARIANTS, references, score
 from .alerts import MAX_SHELVE_H
 from .prompt import INSTRUCTION, crew_line
 from .maintenance import WorkOrder
@@ -68,12 +67,11 @@ def pick_variant(variant: Optional[str],
     if variant is None and seed is None:
         seed = secrets.randbelow(2**31)
     if variant is None:
-        ids = sorted(VARIANTS)
-        variant = ids[seed % len(ids)]
+        variant = SUITE[seed % len(SUITE)].id
     v = VARIANTS[variant]
     if seed is None:
         return v
-    return replace(v, seed=seed)  # also keys the reference_costs cache
+    return replace(v, seed=seed)
 
 
 class AssetOpsGymEnvironment(MCPEnvironment):
@@ -191,10 +189,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
             with self.prof.span("couch.write_rows", rows=len(self.sim.history)):
                 mirror.write_rows(self.couch, self.sim.history)
             with self.prof.span("sim.reference_runs"):
-                # warm the scores' reference runs now, not at the
-                # last step
-                reference_costs(v)
-                event_references(v)
+                # warm the score's reference runs now, not at
+                # the last step
+                references(v)
         self._state = GymState(
             episode_id=episode_id, step_count=0, variant=v.id,
             seed=v.seed, sim_time=iso(self.sim.now))
@@ -372,12 +369,9 @@ class AssetOpsGymEnvironment(MCPEnvironment):
                 sp.set(sim_hours_skipped=(self.sim.now - before)
                        .total_seconds() / 3600)
             r = self.sim.result()
-            reactive, best = reference_costs(self.sim.v)
-            r = replace(r, score=score(self.sim.v, r.cost_total),
-                        event_score=event_score(self.sim.v, r),
-                        end_reason=reason, reference_costs={
-                            "reactive_practice": reactive,
-                            "oracle": best})
+            scored = score(self.sim.v, r)
+            r = replace(r, score=scored.score, event_score=scored,
+                        end_reason=reason)
         self._result = r
         self._state.finished, self._state.score = True, r.score
         self._state.sim_time = iso(self.sim.now)

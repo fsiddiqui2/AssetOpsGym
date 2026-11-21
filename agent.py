@@ -118,8 +118,6 @@ def report(step, prof: Profiler, model: str, agent: str) -> dict:
     d = profile["derived"]
     return {"variant": result.get("variant"), "agent": agent,
             "model": model, "score": step.reward,
-            # the seven-term score, logged beside the reward
-            "event_score": (result.get("event_score") or {}).get("score"),
             "failure_prevented": result.get("failure_prevented"), "false_dispatches": result.get("false_dispatches"),
             "detection_delay_hours": result.get("detection_delay_hours"), "cost_total": result.get("cost_total"),
             "end_reason": result.get("end_reason"), "tool_calls": d["tool_calls"],

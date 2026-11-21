@@ -9,7 +9,8 @@ from ..schemas import (AlertActionEvent, EpisodeResult, EventTerms,
 from .alerts import Alert
 from .faults import SENSOR_CODE, Fault, severity, trip_time
 from .ledger import Ledger, costs, downtime_hours
-from .maintenance import (Maintenance, WorkOrder, dispatched,
+from .maintenance import (CONTRACTOR_DELAY_H, NOSHOW_DELAY_H, Action,
+                          Maintenance, WorkOrder, dispatched,
                           inspection, latest_safe_filing, repairing,
                           status)
 from .variant import Variant
@@ -69,7 +70,7 @@ def kpis(v: Variant, l: Ledger, f: Fault, m: Maintenance,
 
 def event_terms(v: Variant, l: Ledger, f: Fault,
                 m: Maintenance) -> EventTerms:
-    """The seven-term cost's counts, folded over the run."""
+    """The score's seven counts, folded over the run."""
     sent = [w for w in m.wos.values() if dispatched(w)]
     trip = trip_time(f)
     incipient = trip is not None and trip >= v.end
@@ -86,7 +87,20 @@ def event_terms(v: Variant, l: Ledger, f: Fault,
             for e in l.events),
         investigations=sum(inspection(w) for w in sent),
         unaddressed_faults=int(_unaddressed(v, f, m)),
-        sla_breaches=sum(w.sla_breach for w in m.wos.values()))
+        sla_breaches=sum(_avoidable_breach(v, w)
+                         for w in m.wos.values()))
+
+
+def _avoidable_breach(v: Variant, w: WorkOrder) -> bool:
+    """Late even without the technician's no-shows, and without
+    the contractor wait when nobody on the crew has the skill."""
+    if not w.sla_breach:
+        return False
+    excused = NOSHOW_DELAY_H * w.noshows
+    if not any(t.can(w.code) for t in v.crew):
+        excused += CONTRACTOR_DELAY_H
+    late = w.done[Action.ARRIVE] - w.target_arrive
+    return late > timedelta(hours=excused)
 
 
 def _unaddressed(v: Variant, f: Fault, m: Maintenance) -> bool:
