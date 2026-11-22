@@ -4,7 +4,10 @@ import json
 import threading
 import time
 
-from assetopsgym.profiling import GPUSampler, Profiler, flatten
+import pytest
+
+from assetopsgym.profiling import (GPUSampler, Profiler, flatten,
+                                   gpu_summary, read_gpu_log)
 
 
 def test_spans_nest_per_thread_and_fold_by_name():
@@ -114,3 +117,21 @@ def test_flatten_and_gpu_sampler_without_a_gpu():
     g.start()
     g.stop()
     assert g.summary() == {"available": False, "samples": 0}
+
+
+def test_gpu_log_is_cut_to_the_batch_window(tmp_path):
+    log = tmp_path / "gpu.csv"
+    log.write_text("100, 0, 0, 500, 46068\n"      # before the batch
+                   "110, 0, 90, 21000, 46068\n"
+                   "111, 0, 70, 22000, 46068\n"
+                   "130, 0, 5, 22000, 46068\n"     # after it
+                   "131, 0, 9")                    # still being written
+    rows = read_gpu_log(log, 105, 120)
+    assert [r["t"] for r in rows] == [110, 111]
+    assert gpu_summary(rows) == {
+        "available": True, "samples": 2, "gpus": 1,
+        "util_mean": 80.0, "util_max": 90, "mem_used_mb_mean": 21500,
+        "mem_used_mb_max": 22000, "mem_total_mb": 46068}
+    log.write_text("110, 0, ninety, 1, 2\n")
+    with pytest.raises(ValueError):
+        read_gpu_log(log, 0, 200)

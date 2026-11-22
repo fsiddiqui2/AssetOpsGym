@@ -300,9 +300,33 @@ class GPUSampler:
     def summary(self) -> dict:
         if not self.samples:
             return {"available": self.available, "samples": 0}
-        util = [s["util"] for s in self.samples]
-        mem = [s["mem_used_mb"] for s in self.samples]
-        return {"available": True, "samples": len(self.samples), "gpus": len({s["gpu"] for s in self.samples}),
-                "util_mean": round(sum(util) / len(util), 1), "util_max": max(util),
-                "mem_used_mb_mean": round(sum(mem) / len(mem)), "mem_used_mb_max": max(mem),
-                "mem_total_mb": self.samples[-1]["mem_total_mb"]}
+        return gpu_summary(self.samples)
+
+
+def gpu_summary(samples: list[dict]) -> dict:
+    """Utilisation and memory over GPU samples (at least one)."""
+    util = [s["util"] for s in samples]
+    mem = [s["mem_used_mb"] for s in samples]
+    return {"available": True, "samples": len(samples), "gpus": len({s["gpu"] for s in samples}),
+            "util_mean": round(sum(util) / len(util), 1), "util_max": max(util),
+            "mem_used_mb_mean": round(sum(mem) / len(mem)), "mem_used_mb_max": max(mem),
+            "mem_total_mb": samples[-1]["mem_total_mb"]}
+
+
+def read_gpu_log(path: Path, start: float, end: float) -> list[dict]:
+    """The samples a serving host logged (infra/serve.sh with
+    GPU_LOG) between two epoch times: lines of
+    `epoch, index, util %, MiB used, MiB total`. The two machines'
+    clocks must agree. A last line still being written is left
+    out; any other line that does not parse raises."""
+    text = path.read_text()
+    lines = text.splitlines()
+    if text and not text.endswith("\n"):
+        lines = lines[:-1]
+    rows = []
+    for line in lines:
+        t, idx, util, used, total = (float(x) for x in line.split(","))
+        if start <= t <= end:
+            rows.append({"t": t, "gpu": int(idx), "util": util,
+                         "mem_used_mb": used, "mem_total_mb": total})
+    return rows

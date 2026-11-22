@@ -13,8 +13,10 @@ AssetOpsBench's environment (see plan_execute.py).
 
 GPU-hours are this host's GPUs times the wall time. With the
 model served elsewhere (a cluster node behind a tunnel), pass
---gpus with the number serving it; without either, only
-rollouts per hour is reported.
+--gpu-log with a copy of the log infra/serve.sh writes there
+(GPU_LOG): the batch's utilisation, memory and GPU count come
+from the samples inside its time window. --gpus gives the count
+alone; without any of these only rollouts per hour is reported.
 """
 
 from __future__ import annotations
@@ -26,9 +28,11 @@ import queue
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable, ContextManager
 
 from assetopsgym.profiling import (GPUSampler, Profiler, flatten,
+                                   gpu_summary, read_gpu_log,
                                    wandb_run)
 
 # agent name -> its module (run_episode, make_client, NAME,
@@ -52,6 +56,7 @@ class Batch:
     envs: int
     episodes: int  # finished
     errors: tuple[str, ...]  # one per episode that raised
+    started: float  # epoch seconds, to line up other logs
     wall_s: float  # includes opening the sessions
     rollouts_per_hour: float
     rollouts_per_gpu_hour: float | None  # None: no GPU here
@@ -102,13 +107,15 @@ def run_batch(todo: list[Job], envs: int,
 
 
 def fold(agent: str, model: str, envs: int, done: list[dict],
-         errors: list[str], wall_s: float, gpu: dict) -> Batch:
+         errors: list[str], started: float, wall_s: float,
+         gpu: dict) -> Batch:
     n = len(done)
     per_hour = 3600 * n / wall_s
     scores = [d["score"] for d in done if d["score"] is not None]
     return Batch(
         agent=agent, model=model, envs=envs, episodes=n,
-        errors=tuple(errors), wall_s=round(wall_s, 2),
+        errors=tuple(errors), started=round(started, 1),
+        wall_s=round(wall_s, 2),
         rollouts_per_hour=round(per_hour, 2),
         rollouts_per_gpu_hour=(round(per_hour / gpu["gpus"], 2)
                                if gpu.get("gpus") else None),
@@ -135,6 +142,8 @@ def main():
     p.add_argument("--url", default="http://localhost:8000")
     p.add_argument("--gpus", type=int, default=None,
                    help="GPUs serving the model, if not this host's")
+    p.add_argument("--gpu-log", type=Path, default=None,
+                   help="a copy of the serving host's GPU_LOG")
     a = p.parse_args()
 
     from assetopsgym import AssetOpsGymEnv
@@ -153,15 +162,19 @@ def main():
                                limit, Profiler(), job.seed)
 
     gpu = GPUSampler().start()
+    started = time.time()
     done, errors, wall_s = run_batch(
         jobs(a.variant, a.episodes, a.seed0), a.envs,
         open_env, run_one)
     gpu.stop()
     seen = gpu.summary()
-    if a.gpus:
+    if a.gpu_log:
+        seen = gpu_summary(read_gpu_log(a.gpu_log, started,
+                                        started + wall_s))
+    elif a.gpus:
         seen = {**seen, "gpus": a.gpus}
     batch = asdict(fold(a.agent, a.model, a.envs, done, errors,
-                        wall_s, seen))
+                        started, wall_s, seen))
     run = wandb_run()
     if run is not None:
         run.log(flatten({"batch": batch}))

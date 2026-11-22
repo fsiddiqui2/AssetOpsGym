@@ -35,4 +35,5 @@ if mkdir -p "$LOCAL" 2>/dev/null; then
   export TRITON_CACHE_DIR=$LOCAL/triton-cache
   export TORCHINDUCTOR_CACHE_DIR=$LOCAL/inductor-cache
 fi
+export GPU_LOG=${GPU_LOG:-gpu-$SLURM_JOB_ID.csv}
 exec infra/serve.sh "$@"

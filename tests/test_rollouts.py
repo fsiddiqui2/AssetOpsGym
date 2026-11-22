@@ -35,11 +35,12 @@ def test_batch_runs_each_job_once_in_parallel_and_keeps_errors():
     assert len(errors) == 1 and "model down" in errors[0]
     assert wall < 0.3  # 8 x 0.05 s in sequence is 0.4 s
 
-    b = fold("tool_loop", "m", 4, done, errors, 36.0, {"gpus": 2})
+    b = fold("tool_loop", "m", 4, done, errors, 1e9, 36.0,
+             {"gpus": 2})
     assert b.episodes == 7 and b.rollouts_per_hour == 700
     assert b.rollouts_per_gpu_hour == 350
     assert b.llm_s == 7.0 and b.prompt_tokens == 700
     assert b.mean_score == round(2.5 / 7, 4)
-    none = fold("tool_loop", "m", 4, done, errors, 36.0,
+    none = fold("tool_loop", "m", 4, done, errors, 1e9, 36.0,
                 {"available": False, "samples": 0})
     assert none.rollouts_per_gpu_hour is None
