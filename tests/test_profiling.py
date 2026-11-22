@@ -4,7 +4,11 @@ import json
 import threading
 import time
 
-from assetopsgym.profiling import GPUSampler, Profiler, flatten
+import pytest
+
+from assetopsgym.profiling import (GPUSampler, Profiler, flatten,
+                                   gpu_summary, read_gpu_log,
+                                   vllm_work)
 
 
 def test_spans_nest_per_thread_and_fold_by_name():
@@ -114,3 +118,45 @@ def test_flatten_and_gpu_sampler_without_a_gpu():
     g.start()
     g.stop()
     assert g.summary() == {"available": False, "samples": 0}
+
+
+def test_gpu_log_is_cut_to_the_batch_window(tmp_path):
+    log = tmp_path / "gpu.csv"
+    log.write_text("100, 0, 0, 500, 46068\n"      # before the batch
+                   "110, 0, 90, 21000, 46068\n"
+                   "111, 0, 70, 22000, 46068\n"
+                   "130, 0, 5, 22000, 46068\n"     # after it
+                   "131, 0, 9")                    # still being written
+    rows = read_gpu_log(log, 105, 120)
+    assert [r["t"] for r in rows] == [110, 111]
+    assert gpu_summary(rows) == {
+        "available": True, "samples": 2, "gpus": 1,
+        "util_mean": 80.0, "util_max": 90, "mem_used_mb_mean": 21500,
+        "mem_used_mb_max": 22000, "mem_total_mb": 46068}
+    log.write_text("110, 0, ninety, 1, 2\n")
+    with pytest.raises(ValueError):
+        read_gpu_log(log, 0, 200)
+
+
+def test_vllm_work_is_the_difference_of_two_scrapes():
+    def page(n, queue, prefill, decode, ttft, e2e, p, c, g):
+        return {"vllm:e2e_request_latency_seconds_count": n,
+                "vllm:e2e_request_latency_seconds_sum": e2e,
+                "vllm:request_queue_time_seconds_sum": queue,
+                "vllm:request_prefill_time_seconds_sum": prefill,
+                "vllm:request_decode_time_seconds_sum": decode,
+                "vllm:time_to_first_token_seconds_sum": ttft,
+                "vllm:prompt_tokens_total": p,
+                "vllm:prompt_tokens_cached_total": c,
+                "vllm:generation_tokens_total": g}
+    w = vllm_work(page(10, 1, 2, 5, 1, 9, 1000, 100, 50),
+                  page(30, 3, 6, 15, 5, 49, 9000, 6100, 1050))
+    assert (w.requests, w.queue_s, w.prefill_s, w.decode_s) == (
+        20, 2, 4, 10)
+    assert (w.ttft_mean_s, w.e2e_mean_s) == (0.2, 2.0)
+    assert (w.prompt_tokens, w.cached_prompt_tokens) == (8000, 6000)
+    assert w.generation_tokens == 1000
+    assert w.decode_tokens_per_s == 100
+    idle = vllm_work(page(10, 1, 2, 5, 1, 9, 1, 1, 1),
+                     page(10, 1, 2, 5, 1, 9, 1, 1, 1))
+    assert idle.requests == 0 and idle.ttft_mean_s is None

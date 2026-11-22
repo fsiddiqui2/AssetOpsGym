@@ -1,0 +1,34 @@
+# vLLM for the Insomnia cluster, used by infra/insomnia.sbatch.
+#
+# vLLM's PyPI wheel is built for CUDA 13, which Insomnia's GPU
+# driver cannot load ("The NVIDIA driver on your system is too
+# old"). This is vLLM's own +cu129 release wheel with torch from
+# the cu129 index instead. torch and friends are listed because uv
+# applies index pins to direct dependencies only; left to vLLM they
+# resolve to the CUDA 13 builds. vLLM imports torchcodec, whose
+# PyPI wheel also links CUDA 13.
+# 0.32.0 is the newest release that publishes a +cu129 wheel;
+# serve.sh's 0.33.0 does not.
+[project]
+name = "assetopsgym-vllm-insomnia"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "vllm==0.32.0",
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "torchaudio==2.11.0",
+    "torchcodec==0.15.0",
+]
+
+[tool.uv.sources]
+vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.32.0/vllm-0.32.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl" }
+torch = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
+torchcodec = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true

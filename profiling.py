@@ -33,6 +33,7 @@ Span names are dotted; the first segment is the stage. The ones the code emits:
     mcp.aob                                 a proxied AssetOpsBench call (attrs: server, tool)
     llm.chat                                agent side (attrs: prompt_tokens, completion_tokens)
     client.step                             agent side, one env.step over HTTP (attrs: tool)
+    agent.round                             one Plan-Execute run (attrs: round, steps)
 
 GPU utilisation and memory come from `GPUSampler`, which polls nvidia-smi on the
 serving host; on a machine without one it reports `available: False`.
@@ -47,6 +48,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,6 +184,9 @@ class Profiler:
             "llm_calls": sum(1 for s in spans if s.name.startswith("llm.")),
             "tool_calls": sum(1 for s in spans if s.name in ("client.step", "env.step")),
             "prompt_tokens": int(prompt), "completion_tokens": int(completion),
+            # of prompt_tokens, on providers that report a cache
+            "cache_read_tokens": int(asum("cache_read_tokens")),
+            "cache_write_tokens": int(asum("cache_write_tokens")),
             "tokens_per_sim_hour": round(tokens / sim_hours, 1) if sim_hours else None,
             "tokens_per_llm_s": round(tokens / llm_s, 1) if llm_s else None,
         }
@@ -296,9 +301,90 @@ class GPUSampler:
     def summary(self) -> dict:
         if not self.samples:
             return {"available": self.available, "samples": 0}
-        util = [s["util"] for s in self.samples]
-        mem = [s["mem_used_mb"] for s in self.samples]
-        return {"available": True, "samples": len(self.samples), "gpus": len({s["gpu"] for s in self.samples}),
-                "util_mean": round(sum(util) / len(util), 1), "util_max": max(util),
-                "mem_used_mb_mean": round(sum(mem) / len(mem)), "mem_used_mb_max": max(mem),
-                "mem_total_mb": self.samples[-1]["mem_total_mb"]}
+        return gpu_summary(self.samples)
+
+
+@dataclass(frozen=True, slots=True)
+class VllmWork:
+    """What a vLLM server did between two scrapes of its /metrics:
+    where request time went inside the server, and its cache."""
+    requests: int
+    queue_s: float  # waiting for a slot in the batch
+    prefill_s: float  # reading the prompt
+    decode_s: float  # generating
+    ttft_mean_s: float | None  # time to first token
+    e2e_mean_s: float | None  # whole request, as the server saw it
+    prompt_tokens: int
+    cached_prompt_tokens: int  # served from the prefix cache
+    generation_tokens: int
+    decode_tokens_per_s: float | None
+
+
+def scrape(url: str, api_key: str | None) -> dict[str, float]:
+    """A Prometheus /metrics page as {sample name: value}, summed
+    over label sets; histogram buckets are left out."""
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        text = r.read().decode()
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, value = line.rsplit(" ", 1)
+        name = key.partition("{")[0]
+        if not name.endswith("_bucket"):
+            out[name] = out.get(name, 0.0) + float(value)
+    return out
+
+
+def vllm_work(before: dict[str, float],
+              after: dict[str, float]) -> VllmWork:
+    def d(name: str) -> float:
+        return after[f"vllm:{name}"] - before.get(f"vllm:{name}", 0.0)
+
+    n = d("e2e_request_latency_seconds_count")
+    decode, gen = d("request_decode_time_seconds_sum"), d("generation_tokens_total")
+    return VllmWork(
+        requests=int(n),
+        queue_s=round(d("request_queue_time_seconds_sum"), 2),
+        prefill_s=round(d("request_prefill_time_seconds_sum"), 2),
+        decode_s=round(decode, 2),
+        ttft_mean_s=(round(d("time_to_first_token_seconds_sum") / n, 3)
+                     if n else None),
+        e2e_mean_s=(round(d("e2e_request_latency_seconds_sum") / n, 3)
+                    if n else None),
+        prompt_tokens=int(d("prompt_tokens_total")),
+        cached_prompt_tokens=int(d("prompt_tokens_cached_total")),
+        generation_tokens=int(gen),
+        decode_tokens_per_s=round(gen / decode, 1) if decode else None)
+
+
+def gpu_summary(samples: list[dict]) -> dict:
+    """Utilisation and memory over GPU samples (at least one)."""
+    util = [s["util"] for s in samples]
+    mem = [s["mem_used_mb"] for s in samples]
+    return {"available": True, "samples": len(samples), "gpus": len({s["gpu"] for s in samples}),
+            "util_mean": round(sum(util) / len(util), 1), "util_max": max(util),
+            "mem_used_mb_mean": round(sum(mem) / len(mem)), "mem_used_mb_max": max(mem),
+            "mem_total_mb": samples[-1]["mem_total_mb"]}
+
+
+def read_gpu_log(path: Path, start: float, end: float) -> list[dict]:
+    """The samples a serving host logged (infra/serve.sh with
+    GPU_LOG) between two epoch times: lines of
+    `epoch, index, util %, MiB used, MiB total`. The two machines'
+    clocks must agree. A last line still being written is left
+    out; any other line that does not parse raises."""
+    text = path.read_text()
+    lines = text.splitlines()
+    if text and not text.endswith("\n"):
+        lines = lines[:-1]
+    rows = []
+    for line in lines:
+        t, idx, util, used, total = (float(x) for x in line.split(","))
+        if start <= t <= end:
+            rows.append({"t": t, "gpu": int(idx), "util": util,
+                         "mem_used_mb": used, "mem_total_mb": total})
+    return rows

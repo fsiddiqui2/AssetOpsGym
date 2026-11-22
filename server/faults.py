@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ..schemas import FailureEvent, LedgerEvent
+from .variant import Variant
 
 
 @dataclass(frozen=True)
 class FailureCode:
     code: str
+    subsystem: str  # the part of the chiller investigate() names
     description: str
     repair_cost: float
     repair_hours: float
@@ -18,17 +20,27 @@ class FailureCode:
 
 
 FAILURE_CODES = {fc.code: fc for fc in [
-    FailureCode("CH-CWFLOW", "condenser water flow restriction (clogged "
+    FailureCode("CH-CWFLOW", "condenser",
+                "condenser water flow restriction (clogged "
                 "strainer or fouled condenser tubes)", 2500, 8),
-    FailureCode("CH-REFLEAK", "refrigerant leak or low refrigerant charge",
-                5000, 12),
-    FailureCode("CH-COMPWEAR", "compressor mechanical wear", 12000, 16,
+    FailureCode("CH-REFLEAK", "refrigerant circuit",
+                "refrigerant leak or low refrigerant charge", 5000, 12),
+    FailureCode("CH-COMPWEAR", "compressor",
+                "compressor mechanical wear", 12000, 16,
                 parts_hours=48),
-    FailureCode("CH-EVAPFOUL", "evaporator tube fouling", 3000, 8),
-    FailureCode("CH-SENSOR", "sensor drift or failed transmitter", 800, 3),
-    FailureCode("CH-CONTROLS", "chiller control or setpoint fault", 1200, 4),
+    FailureCode("CH-EVAPFOUL", "evaporator",
+                "evaporator tube fouling", 3000, 8),
+    FailureCode("CH-SENSOR", "sensors",
+                "sensor drift or failed transmitter", 800, 3),
+    FailureCode("CH-CONTROLS", "controls",
+                "chiller control or setpoint fault", 1200, 4),
 ]}
 FAULT_MODES = ("CH-CWFLOW", "CH-REFLEAK", "CH-COMPWEAR")
+SENSOR_CODE = "CH-SENSOR"  # the repair that ends a chatter
+SUBSYSTEMS = {fc.subsystem: fc for fc in FAILURE_CODES.values()}
+# An inspection finds a fault from this severity on: about
+# where its primary sensor has moved 3 sigma of its noise.
+INSPECT_MIN_SEVERITY = 0.15
 
 
 @dataclass
@@ -43,6 +55,7 @@ class Fault:
     failed: bool = False
     ever_failed: bool = False
     failed_at: datetime | None = None
+    sensor_fixed: bool = False  # a SENSOR_CODE repair was done
 
 
 def severity(f: Fault, t: datetime) -> float:
@@ -51,6 +64,23 @@ def severity(f: Fault, t: datetime) -> float:
         return 0.0
     return min(1.0, ((t - onset) / timedelta(days=f.pf_days))
                ** f.exponent)
+
+
+def trip_time(f: Fault) -> datetime | None:
+    """When the fault trips the chiller if nobody repairs it."""
+    if f.mode is None or f.onset is None:
+        return None
+    return f.onset + timedelta(days=f.pf_days)
+
+
+def chattering(v: Variant, f: Fault, t: datetime) -> bool:
+    """The variant's chattering transmitter is faulty at t."""
+    if v.chatter_rule is None or f.sensor_fixed:
+        return False
+    day = (t - v.start) / timedelta(days=1)
+    end = (v.horizon_days if v.chatter_end_day is None
+           else v.chatter_end_day)
+    return v.chatter_start_day <= day < end
 
 
 def inject_fault(f: Fault, mode: str, onset: datetime,

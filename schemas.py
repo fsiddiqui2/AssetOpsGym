@@ -130,6 +130,11 @@ class SimulatorAPI(Protocol):
         failure_code: Optional[str] = None): ...
     def cancel_workorder(self, wonum: str, site_id: str,
                          reason: Optional[str] = None): ...
+    def investigate(self, subsystem: str, priority: int = 3,
+                    notes: Optional[str] = None): ...
+    def defer(self, wonum: str, hours: float,
+              reason: Optional[str] = None): ...
+    def assign_technician(self, wonum: str, technician: str): ...
     def acknowledge(self, alert_id: str): ...
     def shelve(self, rule: str, hours: float) -> datetime: ...
     def state(self) -> SimState: ...
@@ -228,13 +233,51 @@ LedgerEvent = Union[CostEvent, DowntimeEvent, FailureEvent,
 
 @dataclass(frozen=True, slots=True)
 class KPIs:
-    """The proposal's five KPIs, each a fold over the ledger. Logged beside the score, not in it."""
+    """The proposal's five KPIs and the inspection visits, each
+    a fold over the ledger, as the plant would count them. The
+    score's own counts are EventTerms."""
 
     downtime_hours: float
     missed_failures: int
     false_dispatches: int
     alert_load: int
     sla_breaches: int
+    # inspection visits (investigate); not false dispatches
+    investigations: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class EventTerms:
+    """The seven event terms: an episode's counts, or the weight
+    of each (scenarios.WEIGHTS), in downtime-hour equivalents."""
+
+    unplanned_downtime_hours: float
+    missed_failures: float
+    false_dispatches: float  # mechanical visits nothing called for
+    acknowledgements: float
+    investigations: float
+    # a fault that can fail inside the horizon, with no order for
+    # it filed by the latest safe time
+    unaddressed_faults: float
+    # late arrivals the agent could have prevented: not a
+    # technician's no-show, nor a contractor wait the crew forced
+    sla_breaches: float
+
+
+@dataclass(frozen=True, slots=True)
+class EventScore:
+    """The score and what it was computed from: threshold rule =
+    0, oracle = 1 (scenarios.score)."""
+
+    cost: float  # the episode's terms, weighted
+    # the variant's mean cost over scenarios.REFERENCE_SEEDS
+    threshold_cost: float
+    oracle_cost: float
+    # (threshold - cost) / (threshold - oracle); None: they tie,
+    # and the score is 1 - (cost - oracle) / TIE_SCALE instead
+    raw: Optional[float]
+    # in [-1, 1], and at most 0 after a failure
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,10 +298,11 @@ class EpisodeResult:
     alerts: dict[AlertKind, int]
     kpis: KPIs
     events: int  # ledger length; the events themselves are in Sim.events
+    event_terms: EventTerms
     # set by the environment at the end of an episode
-    score: Optional[float] = None  # [-1, 1]
+    score: Optional[float] = None  # [-1, 1]; event_score.score
     end_reason: Optional[str] = None
-    reference_costs: Optional[dict[str, float]] = None
+    event_score: Optional[EventScore] = None
 
     def __post_init__(self):
         if abs(sum(self.cost_breakdown.values()) - self.cost_total) > 0.05:

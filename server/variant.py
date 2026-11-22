@@ -47,6 +47,11 @@ class Variant:
     horizon_days: int = 60
     crew: tuple[Technician, ...] = DEFAULT_CREW
     load_profile: Literal["office"] = "office"
+    # a BMS rule whose transmitter chatters across its alarm limit
+    chatter_rule: str | None = None
+    chatter_per_day: float = 40.0  # operator alarms a day
+    chatter_start_day: float = 0.0
+    chatter_end_day: float | None = None  # None: to the horizon
     held_out: bool = False  # kept out of the main suite (shift study)
     tags: tuple[str, ...] = ()
 
@@ -58,6 +63,11 @@ class Variant:
     @property
     def end(self) -> datetime:
         return self.start + timedelta(days=self.horizon_days)
+
+    @property
+    def scenario(self) -> str:
+        """`cf_fast` of `cf_fast.pf6`; a lone variant is its own."""
+        return self.id.partition(".")[0]
 
     @property
     def scoring(self) -> Literal["faulty", "healthy"]:

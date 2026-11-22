@@ -22,6 +22,8 @@ from .telemetry import (ASSET, CAPACITY_TONS, DESIGN_FLOW_GPM, EFFICIENCY,
 from .variant import TICK_H
 
 ANALYTICS_COOLDOWN = timedelta(hours=6)
+# a chattering transmitter reads this far past its alarm limit
+CHATTER_OVER = 1.15
 Z_WINDOW_TICKS = 96
 Z_ALERT = 3.0
 MAX_SHELVE_H = 168
@@ -62,6 +64,21 @@ RULES = [
          "power input above 5 kW while the chiller is off",
          hold_ticks=12, running=False),
 ]
+
+
+RULE = {r.name: r for r in RULES}
+
+
+def spike(r: Rule, v: dict) -> None:
+    """A chatter spike: move the rule's sensor so its metric is
+    CHATTER_OVER times the threshold. Every metric is linear in its
+    sensor; one that does not respond this tick (kW per ton below
+    half load) is left alone."""
+    x, m = v[r.sensor], r.metric(v)
+    slope = r.metric({**v, r.sensor: x + 1}) - m
+    if slope:
+        v[r.sensor] = round(
+            x + (CHATTER_OVER * r.threshold - m) / slope, 3)
 
 
 @dataclass
@@ -133,7 +150,10 @@ def raise_alert(st: AlertState, events: list[LedgerEvent], t: datetime,
 
 
 def evaluate(st: AlertState, events: list[LedgerEvent], t: datetime,
-             v: dict, running: bool) -> None:
+             v: dict, running: bool,
+             chatter: str | None = None) -> None:
+    """`chatter` names a rule whose reading spiked this tick: its
+    alarm fires at once, with no hold, and clears with the spike."""
     for r in RULES:
         rs = st.rules[r.name]
         if running != r.running:
@@ -142,6 +162,11 @@ def evaluate(st: AlertState, events: list[LedgerEvent], t: datetime,
         m = r.metric(v)
         if running:
             _analytics(st, events, t, r, rs, m)
+        if r.name == chatter and m > r.threshold:
+            rs.run = 0
+            raise_alert(st, events, t, "operator_alarm", r.name,
+                        r.sensor, m, f"Operator alarm: {r.message}")
+            continue
         rs.run = rs.run + 1 if m > r.threshold else 0
         if rs.run == r.hold_ticks:
             hours = r.hold_ticks * TICK_H

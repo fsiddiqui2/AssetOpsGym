@@ -145,7 +145,8 @@ Implemented by the refactor stacked on `rares/mise`
 - **All randomness comes from the seed.** Use the sim's
   `rng` / a `random.Random` derived from `Variant.seed`,
   never the module-level `random`. Same seed, same run.
-- **Anchors hold:** do-nothing = 0, oracle ≥ 0.95, every
+- **Anchors hold** on every suite scenario: threshold rule
+  = 0 and oracle = 1 (means over the reference seeds), every
   shortcut ≤ 0.8 (`tests/test_anchors.py`).
 
 ## Workflow

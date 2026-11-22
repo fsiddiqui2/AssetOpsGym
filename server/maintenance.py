@@ -13,7 +13,8 @@ from enum import Enum
 
 from ..schemas import (CostEvent, ErrorCode, GymError,
                        ServiceRequestEvent, WoStatus)
-from .faults import FAILURE_CODES, Fault, severity
+from .faults import (FAILURE_CODES, INSPECT_MIN_SEVERITY, SENSOR_CODE,
+                     SUBSYSTEMS, Fault, chattering, severity)
 from .ledger import Ledger
 from .telemetry import ASSET, SITE
 from .variant import TICK, TICK_H, Technician, Variant, iso
@@ -28,6 +29,11 @@ CONTRACTOR_DELAY_H = 48
 # response later than the priority's target plus this grace is an SLA
 # breach
 SLA_GRACE_H = 4
+# the planner approves this long after filing, and a scheduled
+# visit runs this late (both in ticks, drawn per order)
+APPROVAL_TICKS = (8, 48)
+JITTER_TICKS = (0, 16)
+MAX_DEFER_H = 720
 OPEN = ("WAPPR", "APPR")
 # AssetOpsBench's workorders.WORKTYPES
 WORK_TYPES = ("CM", "PM", "EM", "PdM", "CAL", "INSP", "GEN")
@@ -57,6 +63,9 @@ class WorkOrder:
     reported_by: str | None = None
     work_type: str = "CM"
     location: str | None = None
+    inspect: str | None = None  # the subsystem investigate() named
+    defer_h: float = 0.0  # the agent pushed the visit this much later
+    noshows: int = 0  # times the technician did not turn up
     emergency: bool = False
     canceled: bool = False
     approve_at: datetime | None = None
@@ -101,20 +110,29 @@ def dispatched(w: WorkOrder) -> bool:
     return Action.ARRIVE in w.done
 
 
+def inspection(w: WorkOrder) -> bool:
+    """Still an inspection: no failure code was added to it."""
+    return w.inspect is not None and w.code is None
+
+
 def repairing(m: Maintenance) -> bool:
     return any(w.code and Action.START in w.done
                and status(w) == "INPRG" for w in m.wos.values())
 
 
 def file_wo(m: Maintenance, l: Ledger, v: Variant, now: datetime,
-            code: str | None, priority: int,
-            wonum: str | None) -> WorkOrder:
-    """Shortcut for baselines and scenarios: a request for this
-    site's chiller with the failure code set at filing."""
+            code: str | None, priority: int, wonum: str | None,
+            description: str, notes: str | None) -> WorkOrder:
+    """A request for this site's chiller in one call, with the
+    failure code if there is one: create_work_order, the baselines
+    and the scenarios."""
+    if not description:
+        raise GymError(ErrorCode.BAD_ARGUMENT,
+                       "description is required")
     wo = WorkOrder(_wonum(m, wonum, "SIM"), _code(code),
                    _priority(priority), now, _rng(m, v),
-                   description="Service request")
-    return _request(m, l, now, wo, "Service request filed.")
+                   description=description[:100])
+    return _request(m, l, now, wo, notes or "Service request filed.")
 
 
 def generate_work_order(m: Maintenance, l: Ledger, v: Variant,
@@ -135,6 +153,24 @@ def generate_work_order(m: Maintenance, l: Ledger, v: Variant,
                    reported_by=reported_by, work_type=work_type,
                    location=location)
     return _request(m, l, now, wo, notes or "Service request filed.")
+
+
+def investigate(m: Maintenance, l: Ledger, v: Variant,
+                now: datetime, subsystem: str, priority: int,
+                notes: str | None) -> WorkOrder:
+    """An inspection order for one subsystem. Nothing is repaired
+    and the chiller keeps running; the finding is the technician's
+    closing note."""
+    if subsystem not in SUBSYSTEMS:
+        raise GymError(
+            ErrorCode.BAD_ARGUMENT,
+            f"unknown subsystem {subsystem!r}; one of "
+            f"{', '.join(SUBSYSTEMS)}")
+    wo = WorkOrder(_wonum(m, None, "SIM"), None, _priority(priority),
+                   now, _rng(m, v),
+                   description=f"Inspect the {subsystem}",
+                   work_type="INSP", inspect=subsystem)
+    return _request(m, l, now, wo, notes or "Inspection requested.")
 
 
 def update_workorder(m: Maintenance, l: Ledger, v: Variant,
@@ -165,6 +201,46 @@ def update_workorder(m: Maintenance, l: Ledger, v: Variant,
     return wo
 
 
+def defer(m: Maintenance, l: Ledger, v: Variant, now: datetime,
+          wonum: str, hours: float, reason: str | None) -> WorkOrder:
+    """Push an open order's visit later. The response target moves
+    with it: a deferral is not a late technician."""
+    wo = _find(m, wonum, SITE)
+    _check_open(wo)
+    if not TICK_H <= hours <= MAX_DEFER_H:
+        raise GymError(
+            ErrorCode.BAD_ARGUMENT,
+            f"hours must be between {TICK_H} and {MAX_DEFER_H}")
+    wo.defer_h += hours
+    if Action.APPROVE in wo.done:
+        _schedule(v.crew, wo)
+    _bump(m, wo)
+    _event(l, now, wo, "agent", f"Deferred {hours:g} h by the agent."
+           + (f" {reason}" if reason else ""))
+    return wo
+
+
+def assign_technician(m: Maintenance, l: Ledger, v: Variant,
+                      now: datetime, wonum: str,
+                      technician: str) -> WorkOrder:
+    """The agent's pick instead of the planner's. One without the
+    skill brings in the contractor, as the planner's would."""
+    wo = _find(m, wonum, SITE)
+    _check_open(wo)
+    if technician not in {t.id for t in v.crew}:
+        raise GymError(
+            ErrorCode.NOT_FOUND,
+            f"no technician {technician!r}; the crew is "
+            f"{', '.join(t.id for t in v.crew)}")
+    wo.tech = technician
+    if Action.APPROVE in wo.done:
+        _schedule(v.crew, wo)
+    _bump(m, wo)
+    _event(l, now, wo, "agent",
+           f"Assigned to {technician} by the agent.")
+    return wo
+
+
 def cancel_workorder(m: Maintenance, l: Ledger, now: datetime,
                      wonum: str, site_id: str,
                      reason: str | None) -> WorkOrder:
@@ -175,6 +251,21 @@ def cancel_workorder(m: Maintenance, l: Ledger, now: datetime,
     _event(l, now, wo, "agent", "Cancelled by the agent."
            + (f" {reason}" if reason else ""))
     return wo
+
+
+def latest_safe_filing(v: Variant, code: str,
+                       trip: datetime) -> datetime:
+    """The last moment a priority-1 order for `code` can be filed
+    and still finish before `trip`, on the slowest approval, pick
+    of technician and arrival the planner allows (no-shows aside)."""
+    fc = FAILURE_CODES[code]
+    skilled = [t.travel_h for t in v.crew if t.can(code)]
+    travel = (max(skilled) if skilled else CONTRACTOR_DELAY_H
+              + max(t.travel_h for t in v.crew))
+    return trip - timedelta(hours=(
+        APPROVAL_TICKS[1] * TICK_H + RESPONSE_HOURS[1] + travel
+        + JITTER_TICKS[1] * TICK_H + fc.parts_hours
+        + fc.repair_hours))
 
 
 def respond_to_trip(m: Maintenance, l: Ledger, v: Variant, t: datetime,
@@ -235,6 +326,7 @@ def _approve(m: Maintenance, l: Ledger, f: Fault, v: Variant,
 def _arrive(m: Maintenance, l: Ledger, f: Fault, v: Variant,
             wo: WorkOrder, t: datetime) -> None:
     if not wo.emergency and wo.rng.random() < v.noshow:
+        wo.noshows += 1
         wo.arrive_at += timedelta(hours=NOSHOW_DELAY_H)
         _push(m, wo, Action.ARRIVE, wo.arrive_at)
         _event(l, t, wo, "planner", "Technician did not arrive; "
@@ -252,7 +344,9 @@ def _arrive(m: Maintenance, l: Ledger, f: Fault, v: Variant,
     wo.finish_at = wo.start_at + timedelta(hours=work)
     _push(m, wo, Action.START, wo.start_at)
     _push(m, wo, Action.FINISH, wo.finish_at)
-    if fc is None:
+    if inspection(wo):
+        note = f"{wo.tech} on site to inspect the {wo.inspect}."
+    elif fc is None:
         note = (f"{wo.tech} on site; no failure code given, general "
                 "inspection only.")
     else:
@@ -272,9 +366,10 @@ def _finish(m: Maintenance, l: Ledger, f: Fault, v: Variant,
     wo.done[Action.FINISH] = t
     fc = FAILURE_CODES.get(wo.code)
     if fc is None:
-        _event(l, t, wo, "technician", "General inspection complete: "
-               "no actionable fault identified.",
-               labor_hours=INSPECTION_HOURS)
+        _event(l, t, wo, "technician",
+               _finding(v, f, wo.inspect, t) if wo.inspect else
+               "General inspection complete: no actionable fault "
+               "identified.", labor_hours=INSPECTION_HOURS)
         return
     mult = EMERGENCY_MULTIPLIER if wo.failed_at_start else 1.0
     l.events.append(CostEvent(time=t, kind="repair",
@@ -285,11 +380,28 @@ def _finish(m: Maintenance, l: Ledger, f: Fault, v: Variant,
         f.failed = False
         finding = (f"Confirmed {fc.description}; repaired and "
                    "returned to service.")
+    elif wo.code == SENSOR_CODE and chattering(v, f, t):
+        f.sensor_fixed = True
+        finding = ("Replaced the faulty transmitter behind the "
+                   f"{v.chatter_rule} alarm.")
     else:
         finding = (f"Performed {fc.description} work as requested; "
                    "no matching fault found.")
     _event(l, t, wo, "technician", finding,
            labor_hours=fc.repair_hours)
+
+
+def _finding(v: Variant, f: Fault, subsystem: str,
+             t: datetime) -> str:
+    fc = SUBSYSTEMS[subsystem]
+    if fc.code == SENSOR_CODE and chattering(v, f, t):
+        return (f"Inspected the {subsystem}: found a faulty "
+                f"transmitter behind the {v.chatter_rule} alarm "
+                f"(failure code {fc.code}).")
+    if fc.code == f.mode and severity(f, t) >= INSPECT_MIN_SEVERITY:
+        return (f"Inspected the {subsystem}: found {fc.description} "
+                f"(failure code {fc.code}).")
+    return f"Inspected the {subsystem}: nothing abnormal found."
 
 
 HANDLERS = {Action.APPROVE: _approve, Action.ARRIVE: _arrive,
@@ -320,17 +432,18 @@ def _schedule(crew: tuple[Technician, ...], wo: WorkOrder) -> None:
         tech = next(t for t in crew if t.id == wo.tech)
         extra = tech.travel_h + (0 if tech.can(wo.code)
                                  else CONTRACTOR_DELAY_H)
-    response = (RESPONSE_HOURS[wo.priority] + extra
+    response = (RESPONSE_HOURS[wo.priority] + extra + wo.defer_h
                 + (0 if wo.emergency else wo.jitter_h))
     wo.arrive_at = wo.approve_at + timedelta(hours=response)
     wo.target_arrive = wo.approve_at + timedelta(
-        hours=RESPONSE_HOURS[wo.priority] + tech.travel_h + SLA_GRACE_H)
+        hours=RESPONSE_HOURS[wo.priority] + tech.travel_h
+        + wo.defer_h + SLA_GRACE_H)
 
 
 def _request(m: Maintenance, l: Ledger, now: datetime, wo: WorkOrder,
              note: str) -> WorkOrder:
-    wo.approve_at = now + wo.rng.randint(8, 48) * TICK
-    wo.jitter_h = wo.rng.randint(0, 16) * TICK_H
+    wo.approve_at = now + wo.rng.randint(*APPROVAL_TICKS) * TICK
+    wo.jitter_h = wo.rng.randint(*JITTER_TICKS) * TICK_H
     _insert(m, wo, Action.APPROVE, wo.approve_at)
     _event(l, now, wo, "agent", note)
     return wo
