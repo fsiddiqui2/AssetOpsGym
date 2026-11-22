@@ -5,10 +5,13 @@
 set -euo pipefail
 VLLM=0.33.0
 MODEL=${MODEL:-Qwen/Qwen2.5-3B-Instruct}
+# how vLLM is run: its PyPI build, unless the host needs another
+# (insomnia.sbatch sets VLLM_RUN)
+RUN=${VLLM_RUN:-uvx --python 3.12 --from vllm==$VLLM}
 export PATH=$HOME/.local/bin:$PATH
 command -v uv >/dev/null ||
   curl -LsSf https://astral.sh/uv/install.sh | sh
 # hermes = Qwen2.5's tool-call format; the agent needs it
-exec uvx --python 3.12 --from "vllm==$VLLM" vllm serve \
+exec $RUN vllm serve \
   "$MODEL" --port 8001 --max-model-len 32768 \
   --enable-auto-tool-choice --tool-call-parser hermes "$@"

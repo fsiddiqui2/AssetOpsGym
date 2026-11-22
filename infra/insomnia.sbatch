@@ -1,5 +1,15 @@
 #!/bin/bash
-# vLLM on one Insomnia GPU. From the repo root:
+# vLLM on one Insomnia GPU. Once, from the login node (downloads
+# are slow on compute nodes and should not hold a GPU), with
+# UV_CACHE_DIR, UV_PROJECT_ENVIRONMENT and HF_HOME exported to
+# scratch (home has a 50 GB quota):
+#   uv sync -p 3.12 --project infra/insomnia
+#   uv run --project infra/insomnia python -c "from \
+#     huggingface_hub import snapshot_download as d; \
+#     d('Qwen/Qwen2.5-3B-Instruct')"
+# Then from the repo root, with the same variables plus
+# HF_HUB_OFFLINE=1 and VLLM_API_KEY (the port is open to the
+# cluster) in --export:
 #   sbatch --account=<group> infra/insomnia.sbatch
 # Arguments after the script go to `vllm serve`, e.g.
 #   ... infra/insomnia.sbatch --chat-template infra/qwen25_tools.jinja
@@ -15,4 +25,14 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=vllm-%j.log
 cd "$SLURM_SUBMIT_DIR"
+# the driver here cannot load vLLM's PyPI (CUDA 13) build
+export VLLM_RUN="uv run --project infra/insomnia"
+# the nodes' nvcc is too old for FlashInfer's JIT sampler
+export VLLM_USE_FLASHINFER_SAMPLER=0
+LOCAL=/local/$USER  # node-local disk for vLLM's compile caches
+if mkdir -p "$LOCAL" 2>/dev/null; then
+  export VLLM_CACHE_ROOT=$LOCAL/vllm-cache
+  export TRITON_CACHE_DIR=$LOCAL/triton-cache
+  export TORCHINDUCTOR_CACHE_DIR=$LOCAL/inductor-cache
+fi
 exec infra/serve.sh "$@"

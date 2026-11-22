@@ -11,9 +11,10 @@ seed0 + i div V. Every episode still emits its own profile;
 this adds the batch line. Run the plan-execute agents in
 AssetOpsBench's environment (see plan_execute.py).
 
-GPU-hours are this host's GPUs times the wall time, so run
-it on the vLLM host; elsewhere only rollouts per hour is
-reported.
+GPU-hours are this host's GPUs times the wall time. With the
+model served elsewhere (a cluster node behind a tunnel), pass
+--gpus with the number serving it; without either, only
+rollouts per hour is reported.
 """
 
 from __future__ import annotations
@@ -132,6 +133,8 @@ def main():
     p.add_argument("--limit", type=int, default=None,
                    help="turns (tool loops) or rounds (plan-execute)")
     p.add_argument("--url", default="http://localhost:8000")
+    p.add_argument("--gpus", type=int, default=None,
+                   help="GPUs serving the model, if not this host's")
     a = p.parse_args()
 
     from assetopsgym import AssetOpsGymEnv
@@ -154,8 +157,11 @@ def main():
         jobs(a.variant, a.episodes, a.seed0), a.envs,
         open_env, run_one)
     gpu.stop()
+    seen = gpu.summary()
+    if a.gpus:
+        seen = {**seen, "gpus": a.gpus}
     batch = asdict(fold(a.agent, a.model, a.envs, done, errors,
-                        wall_s, gpu.summary()))
+                        wall_s, seen))
     run = wandb_run()
     if run is not None:
         run.log(flatten({"batch": batch}))
