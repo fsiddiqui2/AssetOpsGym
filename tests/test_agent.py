@@ -26,7 +26,8 @@ class Model:
         self.fail_at, self.error, self.n = fail_at, error, 0
         self.chat = NS(completions=NS(create=self.create))
 
-    def create(self, model, messages, tools):
+    def create(self, model, messages, tools, temperature):
+        assert temperature == 0
         self.n += 1
         if self.n > self.fail_at:
             raise self.error

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import queue
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,8 +32,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, ContextManager
 
-from assetopsgym.profiling import (GPUSampler, Profiler, flatten,
-                                   gpu_summary, read_gpu_log,
+from assetopsgym.profiling import (GPUSampler, Profiler, VllmWork,
+                                   flatten, gpu_summary,
+                                   read_gpu_log, scrape, vllm_work,
                                    wandb_run)
 
 # agent name -> its module (run_episode, make_client, NAME,
@@ -66,6 +68,7 @@ class Batch:
     prompt_tokens: int
     completion_tokens: int
     gpu: dict  # GPUSampler.summary()
+    vllm: VllmWork | None  # with --vllm-metrics
 
 
 def jobs(variants: list[str | None], episodes: int,
@@ -108,7 +111,7 @@ def run_batch(todo: list[Job], envs: int,
 
 def fold(agent: str, model: str, envs: int, done: list[dict],
          errors: list[str], started: float, wall_s: float,
-         gpu: dict) -> Batch:
+         gpu: dict, vllm: VllmWork | None) -> Batch:
     n = len(done)
     per_hour = 3600 * n / wall_s
     scores = [d["score"] for d in done if d["score"] is not None]
@@ -126,7 +129,7 @@ def fold(agent: str, model: str, envs: int, done: list[dict],
         prompt_tokens=sum(d["tokens"]["prompt"] for d in done),
         completion_tokens=sum(d["tokens"]["completion"]
                               for d in done),
-        gpu=gpu)
+        gpu=gpu, vllm=vllm)
 
 
 def main():
@@ -144,6 +147,9 @@ def main():
                    help="GPUs serving the model, if not this host's")
     p.add_argument("--gpu-log", type=Path, default=None,
                    help="a copy of the serving host's GPU_LOG")
+    p.add_argument("--vllm-metrics", default=None,
+                   help="the vLLM server's /metrics URL: the batch "
+                   "records what the server did meanwhile")
     a = p.parse_args()
 
     from assetopsgym import AssetOpsGymEnv
@@ -161,6 +167,8 @@ def main():
         return mod.run_episode(env, llm, a.model, job.variant,
                                limit, Profiler(), job.seed)
 
+    key = os.environ.get("OPENAI_API_KEY")
+    before = scrape(a.vllm_metrics, key) if a.vllm_metrics else None
     gpu = GPUSampler().start()
     started = time.time()
     done, errors, wall_s = run_batch(
@@ -173,8 +181,10 @@ def main():
                                         started + wall_s))
     elif a.gpus:
         seen = {**seen, "gpus": a.gpus}
+    work = (vllm_work(before, scrape(a.vllm_metrics, key))
+            if a.vllm_metrics else None)
     batch = asdict(fold(a.agent, a.model, a.envs, done, errors,
-                        started, wall_s, seen))
+                        started, wall_s, seen, work))
     run = wandb_run()
     if run is not None:
         run.log(flatten({"batch": batch}))

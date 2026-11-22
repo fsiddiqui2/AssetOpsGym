@@ -48,6 +48,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -301,6 +302,63 @@ class GPUSampler:
         if not self.samples:
             return {"available": self.available, "samples": 0}
         return gpu_summary(self.samples)
+
+
+@dataclass(frozen=True, slots=True)
+class VllmWork:
+    """What a vLLM server did between two scrapes of its /metrics:
+    where request time went inside the server, and its cache."""
+    requests: int
+    queue_s: float  # waiting for a slot in the batch
+    prefill_s: float  # reading the prompt
+    decode_s: float  # generating
+    ttft_mean_s: float | None  # time to first token
+    e2e_mean_s: float | None  # whole request, as the server saw it
+    prompt_tokens: int
+    cached_prompt_tokens: int  # served from the prefix cache
+    generation_tokens: int
+    decode_tokens_per_s: float | None
+
+
+def scrape(url: str, api_key: str | None) -> dict[str, float]:
+    """A Prometheus /metrics page as {sample name: value}, summed
+    over label sets; histogram buckets are left out."""
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        text = r.read().decode()
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, value = line.rsplit(" ", 1)
+        name = key.partition("{")[0]
+        if not name.endswith("_bucket"):
+            out[name] = out.get(name, 0.0) + float(value)
+    return out
+
+
+def vllm_work(before: dict[str, float],
+              after: dict[str, float]) -> VllmWork:
+    def d(name: str) -> float:
+        return after[f"vllm:{name}"] - before.get(f"vllm:{name}", 0.0)
+
+    n = d("e2e_request_latency_seconds_count")
+    decode, gen = d("request_decode_time_seconds_sum"), d("generation_tokens_total")
+    return VllmWork(
+        requests=int(n),
+        queue_s=round(d("request_queue_time_seconds_sum"), 2),
+        prefill_s=round(d("request_prefill_time_seconds_sum"), 2),
+        decode_s=round(decode, 2),
+        ttft_mean_s=(round(d("time_to_first_token_seconds_sum") / n, 3)
+                     if n else None),
+        e2e_mean_s=(round(d("e2e_request_latency_seconds_sum") / n, 3)
+                    if n else None),
+        prompt_tokens=int(d("prompt_tokens_total")),
+        cached_prompt_tokens=int(d("prompt_tokens_cached_total")),
+        generation_tokens=int(gen),
+        decode_tokens_per_s=round(gen / decode, 1) if decode else None)
 
 
 def gpu_summary(samples: list[dict]) -> dict:

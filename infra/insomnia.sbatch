@@ -11,6 +11,9 @@
 # HF_HUB_OFFLINE=1 and VLLM_API_KEY (the port is open to the
 # cluster) in --export:
 #   sbatch --account=<group> infra/insomnia.sbatch
+# MODEL picks another model; Qwen3 also needs
+#   --default-chat-template-kwargs '{"enable_thinking": false}'
+# or it thinks before every answer.
 # Arguments after the script go to `vllm serve`, e.g.
 #   ... infra/insomnia.sbatch --chat-template infra/qwen25_tools.jinja
 # (Qwen2.5's template with its tool-call example in single

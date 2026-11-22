@@ -28,6 +28,9 @@ from assetopsgym.profiling import Profiler
 NAME = "tool_loop"  # this agent, in profiles and rollouts.py
 DEFAULT_LIMIT = 60  # turns
 MAX_TOOL_CHARS = 6000
+# so a seed's episode is the same every time, and comparable with
+# Plan-Execute, which sends 0 too (GPT-5 models reject it)
+TEMPERATURE = 0.0
 NUDGE = "Keep going: use the tools, advance time, or call finish."
 GUIDE = ("Work like an engineer on shift: check the data, decide how far to advance time, and act on evidence. "
          "Tool results longer than a few thousand characters are cut off, so prefer sensor_stats over a time "
@@ -94,7 +97,8 @@ def run_episode(env, llm: OpenAI, model: str, variant: str | None, max_turns: in
     for turn in range(max_turns):
         with prof.span("llm.chat", turn=turn, messages=len(messages)) as sp:
             try:
-                resp = llm.chat.completions.create(model=model, messages=messages, tools=tools)
+                resp = llm.chat.completions.create(model=model, messages=messages, tools=tools,
+                                                   temperature=TEMPERATURE)
             except BadRequestError as e:
                 # the conversation outgrew the model: score the
                 # state reached, like running out of turns
